@@ -99,3 +99,39 @@ class PolicyId(DomainId):
 
 class PolicyVersion(DomainId):
     pass
+
+
+class RunId(DomainId):
+    pass
+
+
+class ProducerId(DomainId):
+    pass
+
+
+class WalSegmentId(DomainId):
+    pass
+
+
+class SidecarId(DomainId):
+    pass
+
+
+class ConsumerId(DomainId):
+    pass
+
+
+class BrokerTopicId(DomainId):
+    pass
+
+
+class BrokerPartitionId(DomainId):
+    pass
+
+
+class BrokerMessageId(DomainId):
+    pass
+
+
+class BatchId(DomainId):
+    pass
