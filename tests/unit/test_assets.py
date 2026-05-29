@@ -124,3 +124,47 @@ def test_no_implicit_conversion_to_usd() -> None:
 
     assert not hasattr(amount, "to_usd")
     assert not hasattr(delta, "to_usd")
+
+
+def test_asset_symbol_non_string_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        AssetSymbol(123)  # type: ignore[arg-type]
+
+
+def test_stable_collateral_non_symbol_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        StableCollateralAsset(object())  # type: ignore[arg-type]
+
+
+def test_asset_amount_invalid_asset_type_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        AssetAmount(asset=object(), amount="1")  # type: ignore[arg-type]
+
+
+def test_asset_delta_invalid_asset_type_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        AssetDelta(asset=object(), amount="0")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad", ["abc", "", "not-a-number", "1e.5", "--1"])
+def test_asset_amount_invalid_decimal_string_raises_validation_error(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        AssetAmount(asset="USDT", amount=bad)
+
+
+@pytest.mark.parametrize("bad", ["abc", "", "not-a-number"])
+def test_asset_delta_invalid_decimal_string_raises_validation_error(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        AssetDelta(asset="USDT", amount=bad)
+
+
+@pytest.mark.parametrize("bad", [" 0.5", "1 ", " 1.0 "])
+def test_asset_amount_whitespace_string_raises_validation_error(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        AssetAmount(asset="USDT", amount=bad)
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "sNaN"])
+def test_asset_amount_non_finite_string_raises_validation_error(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        AssetAmount(asset="USDT", amount=bad)

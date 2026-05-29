@@ -17,3 +17,8 @@ def test_domain_id_accepts_trimmed_non_empty_value() -> None:
 def test_domain_id_rejects_invalid_values(value: str) -> None:
     with pytest.raises(ValidationError):
         BotId(value)
+
+
+def test_domain_id_non_string_raises_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        BotId(123)  # type: ignore[arg-type]

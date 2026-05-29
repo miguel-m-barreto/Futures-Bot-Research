@@ -23,7 +23,7 @@ class DomainId(BaseModel):
     @classmethod
     def _validate_value(cls, value: str) -> str:
         if not isinstance(value, str):
-            raise TypeError("domain id must be a string")
+            raise ValueError("domain id must be a string")
         if not value:
             raise ValueError("domain id must be non-empty")
         if value != value.strip():
@@ -70,6 +70,14 @@ class PositionId(DomainId):
 
 
 class DecisionIntentId(DomainId):
+    pass
+
+
+class EvidenceId(DomainId):
+    pass
+
+
+class CandidateId(DomainId):
     pass
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -26,7 +26,7 @@ class AssetSymbol(BaseModel):
     @classmethod
     def _validate_value(cls, value: str) -> str:
         if not isinstance(value, str):
-            raise TypeError("asset symbol must be a string")
+            raise ValueError("asset symbol must be a string")
         if not _ASSET_SYMBOL_RE.fullmatch(value):
             raise ValueError("asset symbol must be 2..16 uppercase ASCII letters/digits")
         return value
@@ -63,7 +63,7 @@ class StableCollateralAsset(BaseModel):
             return value
         if isinstance(value, str):
             return AssetSymbol(value)
-        raise TypeError("stable collateral asset must be an asset symbol")
+        raise ValueError("stable collateral asset must be an asset symbol")
 
     @field_validator("symbol")
     @classmethod
@@ -248,7 +248,7 @@ def _coerce_asset_symbol(value: object) -> AssetSymbol:
         return value
     if isinstance(value, str):
         return AssetSymbol(value)
-    raise TypeError("asset must be an AssetSymbol, StableCollateralAsset, or string")
+    raise ValueError("asset must be an AssetSymbol, StableCollateralAsset, or string")
 
 
 def _coerce_decimal(value: object) -> Decimal:
@@ -258,8 +258,15 @@ def _coerce_decimal(value: object) -> Decimal:
         raise ValueError("float input is prohibited for accounting")
     if isinstance(value, Decimal):
         decimal_value = value
-    elif isinstance(value, int | str):
+    elif isinstance(value, int):
         decimal_value = Decimal(value)
+    elif isinstance(value, str):
+        if value != value.strip():
+            raise ValueError("accounting amount string must be trimmed")
+        try:
+            decimal_value = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"accounting amount is not a valid decimal string: {value!r}") from exc
     else:
         raise ValueError("accounting amount must be Decimal, int, or string")
     if not decimal_value.is_finite():

@@ -24,7 +24,7 @@ class InstrumentSymbol(BaseModel):
     @classmethod
     def _validate_value(cls, value: str) -> str:
         if not isinstance(value, str):
-            raise TypeError("instrument symbol must be a string")
+            raise ValueError("instrument symbol must be a string")
         if value.count("/") != 1:
             raise ValueError("instrument symbol must use logical BASE/QUOTE format")
         base, quote = value.split("/")
@@ -105,7 +105,7 @@ class InstrumentMetadata(BaseModel):
             return value
         if isinstance(value, str):
             return InstrumentSymbol(value)
-        raise TypeError("instrument must be an InstrumentSymbol or string")
+        raise ValueError("instrument must be an InstrumentSymbol or string")
 
     @field_validator("base_asset", "quote_asset", mode="before")
     @classmethod
@@ -114,7 +114,7 @@ class InstrumentMetadata(BaseModel):
             return value
         if isinstance(value, str):
             return AssetSymbol(value)
-        raise TypeError("asset must be an AssetSymbol or string")
+        raise ValueError("asset must be an AssetSymbol or string")
 
     @model_validator(mode="after")
     def _validate_assets(self) -> InstrumentMetadata:
