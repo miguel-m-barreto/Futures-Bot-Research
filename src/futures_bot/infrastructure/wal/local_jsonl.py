@@ -120,8 +120,12 @@ def _compute_payload_hash(event: EventEnvelope) -> str:
 def _load_metadata_for_run(
     metadata_dir: Path, run_id: RunId
 ) -> list[WalSegmentMetadata]:
+    run_prefix = f"{run_id}-segment-"
     result: list[WalSegmentMetadata] = []
     for path in metadata_dir.glob("*.json"):
+        # Skip files from other runs before reading or parsing.
+        if not path.stem.startswith(run_prefix):
+            continue
         try:
             meta = WalSegmentMetadata.model_validate_json(
                 path.read_text(encoding="utf-8")
@@ -130,8 +134,17 @@ def _load_metadata_for_run(
             raise LocalWalCorruptionError(
                 f"failed to parse metadata file {path}"
             ) from exc
-        if str(meta.run_id) == str(run_id):
-            result.append(meta)
+        if str(meta.run_id) != str(run_id):
+            raise LocalWalCorruptionError(
+                f"metadata file {path.name} contains run_id={meta.run_id!r}, "
+                f"expected {run_id!r}"
+            )
+        if path.stem != str(meta.segment_id):
+            raise LocalWalCorruptionError(
+                f"metadata filename {path.name} does not match "
+                f"internal segment_id={meta.segment_id!r}"
+            )
+        result.append(meta)
     return result
 
 
@@ -190,11 +203,18 @@ class LocalJsonlWal:
                 f"multiple OPEN segments for run_id={config.run_id}"
             )
 
+        # Reject orphan files before any validation or disk writes.
+        self._validate_no_orphan_files()
+
         sealed_sorted = sorted(
             sealed,
             key=lambda m: _segment_index_from_id(m.segment_id, config.run_id),
         )
         self._sealed_meta = sealed_sorted
+
+        # Validate every sealed segment's JSONL content and metadata at startup.
+        for _sealed in sealed_sorted:
+            self._read_segment_records(_sealed.segment_id, metadata=_sealed)
 
         last_sealed_offset: int | None = None
         if sealed_sorted and sealed_sorted[-1].offset_range is not None:
@@ -225,6 +245,12 @@ class LocalJsonlWal:
             self._current_segment_index = next_index
             self._active_segment_id = _segment_id_for(config.run_id, next_index)
             self._active_segment_created_at = _utcnow()
+
+        # All integrity checks must pass before any new segment is written to disk.
+        self._validate_segment_index_continuity(all_meta)
+        self._validate_global_offset_continuity(self.list_segment_metadata())
+
+        if not open_segs:
             self._save_metadata(self.current_segment_metadata())
 
         self._active_file = self._segment_path(
@@ -233,39 +259,15 @@ class LocalJsonlWal:
         return self
 
     def _recover_open_segment(self, meta: WalSegmentMetadata) -> None:
-        path = self._segment_path(meta.segment_id)
-        if not path.exists():
-            raise LocalWalCorruptionError(f"OPEN segment file missing: {path}")
-
-        text = path.read_text(encoding="utf-8")
-        records: list[JournalRecord] = []
-        total_bytes = 0
-
-        for line_num, raw_line in enumerate(text.splitlines(), 1):
-            if not raw_line.strip():
-                continue
-            try:
-                record = JournalRecord.model_validate_json(raw_line)
-            except Exception as exc:
-                raise LocalWalCorruptionError(
-                    f"malformed record at line {line_num} in {path}"
-                ) from exc
-            records.append(record)
-            total_bytes += len(raw_line.encode()) + 1  # +1 for trailing \n
-
+        records, actual_byte_count = self._read_segment_records(
+            meta.segment_id, metadata=meta
+        )
         self._active_event_count = len(records)
-        self._active_byte_count = total_bytes
-
+        self._active_byte_count = actual_byte_count
         if records:
             self._active_first_offset = records[0].wal_offset.value
             self._active_last_offset = records[-1].wal_offset.value
             self._next_offset = self._active_last_offset + 1
-
-        if meta.event_count != self._active_event_count:
-            raise LocalWalCorruptionError(
-                f"metadata event_count={meta.event_count} but {path} "
-                f"contains {self._active_event_count} records"
-            )
 
     # ── Path helpers ──────────────────────────────────────────────────────────
 
@@ -378,31 +380,25 @@ class LocalJsonlWal:
         """Yield every record across all segments in WAL offset order."""
         if not self._closed:
             self._active_file.flush()
+        expected_offset = 0
         for meta in self.list_segment_metadata():
-            yield from self.read_segment(meta.segment_id)
+            for record in self.read_segment(meta.segment_id):
+                if record.wal_offset.value != expected_offset:
+                    raise LocalWalCorruptionError(
+                        f"global WAL offset discontinuity: expected {expected_offset}, "
+                        f"got {record.wal_offset.value} in segment {meta.segment_id}"
+                    )
+                expected_offset += 1
+                yield record
 
     def read_segment(self, segment_id: WalSegmentId) -> tuple[JournalRecord, ...]:
         """Read and return all records from the named segment.
 
         Raises LocalWalCorruptionError if the file is missing or malformed.
         """
-        path = self._segment_path(segment_id)
-        if not path.exists():
-            raise LocalWalCorruptionError(f"segment file not found: {path}")
-
-        text = path.read_text(encoding="utf-8")
-        records: list[JournalRecord] = []
-        for line_num, raw_line in enumerate(text.splitlines(), 1):
-            if not raw_line.strip():
-                continue
-            try:
-                record = JournalRecord.model_validate_json(raw_line)
-            except Exception as exc:
-                raise LocalWalCorruptionError(
-                    f"malformed record at line {line_num} in {path}"
-                ) from exc
-            records.append(record)
-        return tuple(records)
+        meta = self._find_metadata(segment_id)
+        records, _ = self._read_segment_records(segment_id, metadata=meta)
+        return records
 
     def close(self) -> None:
         """Flush and release the active file handle.
@@ -421,6 +417,178 @@ class LocalJsonlWal:
             self._active_file.close()
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _validate_no_orphan_files(self) -> None:
+        """Raise if any segment JSONL file lacks metadata or vice versa.
+
+        A JSONL without matching metadata, or metadata without a matching JSONL,
+        indicates a partially-committed write or accidental deletion. Files that
+        do not match this run_id's segment prefix are silently ignored.
+        """
+        run_prefix = f"{self._config.run_id}-segment-"
+        for jsonl_path in self._segments_dir.iterdir():
+            if jsonl_path.suffix != ".jsonl":
+                continue
+            if not jsonl_path.stem.startswith(run_prefix):
+                continue
+            if not (self._metadata_dir / f"{jsonl_path.stem}.json").exists():
+                raise LocalWalCorruptionError(
+                    f"orphan segment file has no matching metadata: {jsonl_path.name}"
+                )
+        for meta_path in self._metadata_dir.iterdir():
+            if meta_path.suffix != ".json":
+                continue
+            if not meta_path.stem.startswith(run_prefix):
+                continue
+            if not (self._segments_dir / f"{meta_path.stem}.jsonl").exists():
+                raise LocalWalCorruptionError(
+                    f"orphan metadata file has no matching segment: {meta_path.name}"
+                )
+
+    def _validate_segment_index_continuity(
+        self, all_meta: list[WalSegmentMetadata]
+    ) -> None:
+        """Validate that segment indices form a contiguous sequence starting at 1.
+
+        Segment IDs follow the pattern run_id-segment-NNNNNN; a gap or a first
+        index above 1 indicates deleted, lost, or re-ordered metadata/files.
+        """
+        if not all_meta:
+            return
+        indices = sorted(
+            _segment_index_from_id(m.segment_id, self._config.run_id)
+            for m in all_meta
+        )
+        if indices[0] != 1:
+            raise LocalWalCorruptionError(
+                f"segment indices must start at 1, got {indices[0]}"
+            )
+        for i in range(1, len(indices)):
+            if indices[i] != indices[i - 1] + 1:
+                raise LocalWalCorruptionError(
+                    f"segment index gap: expected {indices[i - 1] + 1}, "
+                    f"got {indices[i]}"
+                )
+
+    def _validate_global_offset_continuity(
+        self, segments: tuple[WalSegmentMetadata, ...]
+    ) -> None:
+        """Validate that non-empty segments form one contiguous global offset stream.
+
+        The first non-empty segment must start at offset 0; each subsequent
+        non-empty segment must start at previous_last_offset + 1.
+        Empty segments (offset_range is None) are skipped.
+        """
+        expected_next: int = 0
+        for meta in segments:
+            if meta.offset_range is None:
+                continue
+            first = meta.offset_range.first.value
+            if first != expected_next:
+                raise LocalWalCorruptionError(
+                    f"global WAL offset discontinuity: segment {meta.segment_id} "
+                    f"starts at offset {first}, expected {expected_next}"
+                )
+            expected_next = meta.offset_range.last.value + 1
+
+    def _find_metadata(self, segment_id: WalSegmentId) -> WalSegmentMetadata | None:
+        for meta in self._sealed_meta:
+            if meta.segment_id == segment_id:
+                return meta
+        active = self.current_segment_metadata()
+        if active.segment_id == segment_id:
+            return active
+        return None
+
+    def _read_segment_records(  # noqa: PLR0912
+        self,
+        segment_id: WalSegmentId,
+        *,
+        metadata: WalSegmentMetadata | None = None,
+    ) -> tuple[tuple[JournalRecord, ...], int]:
+        """Read and strictly validate all records from a segment JSONL file.
+
+        Returns (records, actual_file_byte_count).
+        Raises LocalWalCorruptionError for any structural or identity inconsistency.
+        If *metadata* is supplied, also validates event_count, offset_range, and
+        payload_bytes against the metadata.
+        """
+        path = self._segment_path(segment_id)
+        if not path.exists():
+            raise LocalWalCorruptionError(f"segment file missing: {path}")
+
+        raw_bytes = path.read_bytes()
+        actual_byte_count = len(raw_bytes)
+        try:
+            text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LocalWalCorruptionError(
+                f"invalid UTF-8 in segment file: {path}"
+            ) from exc
+
+        records: list[JournalRecord] = []
+        for line_num, raw_line in enumerate(text.splitlines(), 1):
+            if not raw_line or not raw_line.strip():
+                raise LocalWalCorruptionError(
+                    f"blank line at line {line_num} in {path}"
+                )
+            try:
+                record = JournalRecord.model_validate_json(raw_line)
+            except Exception as exc:
+                raise LocalWalCorruptionError(
+                    f"malformed record at line {line_num} in {path}"
+                ) from exc
+            if str(record.run_id) != str(self._config.run_id):
+                raise LocalWalCorruptionError(
+                    f"run_id mismatch at line {line_num} in {path}: "
+                    f"expected {self._config.run_id!r}, got {record.run_id!r}"
+                )
+            if str(record.producer_id) != str(self._config.producer_id):
+                raise LocalWalCorruptionError(
+                    f"producer_id mismatch at line {line_num} in {path}: "
+                    f"expected {self._config.producer_id!r}, got {record.producer_id!r}"
+                )
+            if records:
+                expected = records[-1].wal_offset.value + 1
+                if record.wal_offset.value != expected:
+                    raise LocalWalCorruptionError(
+                        f"non-contiguous offset at line {line_num} in {path}: "
+                        f"expected {expected}, got {record.wal_offset.value}"
+                    )
+            records.append(record)
+
+        if metadata is not None:
+            if len(records) != metadata.event_count:
+                raise LocalWalCorruptionError(
+                    f"metadata event_count={metadata.event_count} but {path} "
+                    f"contains {len(records)} records"
+                )
+            if records:
+                if metadata.offset_range is None:
+                    raise LocalWalCorruptionError(
+                        f"metadata offset_range is None but {path} has {len(records)} records"
+                    )
+                if records[0].wal_offset.value != metadata.offset_range.first.value:
+                    raise LocalWalCorruptionError(
+                        f"first record offset {records[0].wal_offset.value} != "
+                        f"metadata offset_range.first {metadata.offset_range.first.value} in {path}"
+                    )
+                if records[-1].wal_offset.value != metadata.offset_range.last.value:
+                    raise LocalWalCorruptionError(
+                        f"last record offset {records[-1].wal_offset.value} != "
+                        f"metadata offset_range.last {metadata.offset_range.last.value} in {path}"
+                    )
+            elif metadata.offset_range is not None:
+                raise LocalWalCorruptionError(
+                    f"metadata offset_range is set but {path} has 0 records"
+                )
+            if actual_byte_count != metadata.payload_bytes:
+                raise LocalWalCorruptionError(
+                    f"metadata payload_bytes={metadata.payload_bytes} but "
+                    f"actual file size is {actual_byte_count} bytes for {path}"
+                )
+
+        return tuple(records), actual_byte_count
 
     def _should_rollover(self, now: datetime) -> bool:
         if self._active_byte_count >= self._config.segment_max_bytes:
