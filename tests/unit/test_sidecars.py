@@ -579,3 +579,44 @@ def test_gc_archived_segment_kept_regardless_of_delete_flag() -> None:
             archive_instead_of_delete=flag,
         )
         assert decision.action is WalGcAction.KEEP
+
+
+# ── WAL_RELAY exclusion from required checkpoints ─────────────────────────────
+
+
+def test_wal_relay_never_appears_in_required_checkpoints() -> None:
+    # WAL_RELAY cannot have is_required_for_wal_gc=True (model validator rejects it),
+    # so it can never surface in required_checkpoints() regardless of its offset.
+    relay_cp = SidecarCheckpoint(
+        sidecar_id=SidecarId("relay-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=9999),
+        updated_at=_utc(),
+        is_required_for_wal_gc=False,
+    )
+    cs = RequiredConsumerCheckpointSet(
+        run_id=RunId("run-1"),
+        checkpoints=(relay_cp,),
+    )
+    assert relay_cp not in cs.required_checkpoints()
+    assert cs.required_min_offset() is None
+    assert cs.all_required_consumers_reached(WalOffset(value=0)) is False
+
+
+def test_db_writer_required_checkpoint_authorizes_gc_when_offset_reached() -> None:
+    # DB_WRITER is the canonical required consumer — once it reaches the segment
+    # end offset, GC is eligible.  WAL_RELAY progress alone cannot substitute.
+    segment = _sealed_segment(first=0, last=4)
+    db_cp = SidecarCheckpoint(
+        sidecar_id=SidecarId("db-1"),
+        sidecar_kind=SidecarKind.DB_WRITER,
+        run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=4),
+        updated_at=_utc(),
+        is_required_for_wal_gc=True,
+    )
+    cs = RequiredConsumerCheckpointSet(run_id=RunId("run-1"), checkpoints=(db_cp,))
+    decision = decide_wal_gc(segment, cs, _utc())
+    assert decision.eligible is True
+    assert decision.action is WalGcAction.ARCHIVE
