@@ -14,8 +14,17 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.events import EventEnvelope, EventType
-from futures_bot.domain.ids import BotId, EventId, ProducerId, RunId
+from futures_bot.domain.events import EventEnvelope, EventType, OrderSubmitAttemptedPayload
+from futures_bot.domain.execution import OrderSide, OrderType
+from futures_bot.domain.ids import (
+    BotId,
+    EventId,
+    ExecutionIntentId,
+    InstrumentId,
+    OrderIntentId,
+    ProducerId,
+    RunId,
+)
 from futures_bot.domain.journal import JournalRecord
 from futures_bot.domain.wal import WalAppendStatus, WalSegmentStatus
 from futures_bot.infrastructure.wal.local_jsonl import (
@@ -49,6 +58,27 @@ def _event(event_id: str = "evt-1") -> EventEnvelope:
         occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
         bot_id=BotId("bot-1"),
         schema_version="1.0",
+    )
+
+
+def _order_submit_attempted_event(event_id: str = "evt-order-submit-1") -> EventEnvelope:
+    return EventEnvelope(
+        event_id=EventId(event_id),
+        event_type=EventType.ORDER_SUBMIT_ATTEMPTED,
+        occurred_at=datetime(2026, 1, 1, tzinfo=UTC),
+        bot_id=BotId("bot-1"),
+        schema_version="1.0",
+        payload=OrderSubmitAttemptedPayload(
+            execution_intent_id=ExecutionIntentId("execution-intent-1"),
+            order_intent_id=OrderIntentId("order-intent-1"),
+            client_order_id="client-order-1",
+            instrument_id=InstrumentId("BTC-USDT-PERP"),
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity="0.25",
+            reduce_only=False,
+            attempted_at=datetime(2026, 1, 1, tzinfo=UTC),
+        ),
     )
 
 
@@ -120,6 +150,27 @@ def test_payload_hash_is_deterministic_for_same_event(tmp_path: Path) -> None:
     assert r1.record is not None
     assert r2.record is not None
     assert r1.record.payload_hash == r2.record.payload_hash
+
+
+def test_order_submit_attempted_event_round_trips_through_local_jsonl_wal(
+    tmp_path: Path,
+) -> None:
+    event = _order_submit_attempted_event()
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    append_result = wal.append(event)
+
+    records = list(wal.iter_records())
+    wal.close()
+
+    assert append_result.appended is True
+    assert append_result.record is not None
+    assert len(records) == 1
+    record = records[0]
+    assert record.payload_hash == append_result.record.payload_hash
+    assert record.event.event_type is EventType.ORDER_SUBMIT_ATTEMPTED
+    assert record.event.payload["quantity"] == "0.25"
+    assert record.event.payload["attempted_at"] == "2026-01-01T00:00:00Z"
+    assert record.event.payload["order_type"] == "MARKET"
 
 
 def test_record_size_bytes_is_positive(tmp_path: Path) -> None:

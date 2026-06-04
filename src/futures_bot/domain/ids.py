@@ -69,7 +69,27 @@ class PositionId(DomainId):
     pass
 
 
+class InstrumentId(DomainId):
+    pass
+
+
 class DecisionIntentId(DomainId):
+    pass
+
+
+class ExecutionIntentId(DomainId):
+    pass
+
+
+class OrderIntentId(DomainId):
+    pass
+
+
+class ExchangeOrderId(DomainId):
+    pass
+
+
+class FillId(DomainId):
     pass
 
 
