@@ -70,6 +70,46 @@ def test_paused_operational_status_cannot_trade() -> None:
     assert not bot.can_trade_paper_intents()
 
 
+def _bot(
+    run_mode: RunMode,
+    capital_mode: CapitalMode,
+    operational_status: OperationalStatus,
+) -> BotInstance:
+    return BotInstance(
+        bot_id=BotId("bot-1"),
+        blueprint_id=BotBlueprintId("blueprint-1"),
+        experiment_id=ExperimentId("experiment-1"),
+        cohort_id=CohortId("cohort-1"),
+        bucket_id=BucketId("bucket-1"),
+        run_mode=run_mode,
+        capital_mode=capital_mode,
+        operational_status=operational_status,
+        research_status=ResearchStatus.PROMOTED,
+        capital_asset=StableCollateralAsset("USDT"),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+
+def test_live_real_running_bot_cannot_trade_paper_intents() -> None:
+    bot = _bot(RunMode.LIVE, CapitalMode.REAL, OperationalStatus.RUNNING)
+    assert not bot.can_trade_paper_intents()
+
+
+def test_paper_live_with_real_capital_cannot_trade_paper_intents() -> None:
+    bot = _bot(RunMode.PAPER_LIVE, CapitalMode.REAL, OperationalStatus.RUNNING)
+    assert not bot.can_trade_paper_intents()
+
+
+def test_paper_live_simulated_safe_mode_cannot_trade_paper_intents() -> None:
+    bot = _bot(RunMode.PAPER_LIVE, CapitalMode.SIMULATED, OperationalStatus.SAFE_MODE)
+    assert not bot.can_trade_paper_intents()
+
+
+def test_paper_live_simulated_paused_cannot_trade_paper_intents() -> None:
+    bot = _bot(RunMode.PAPER_LIVE, CapitalMode.SIMULATED, OperationalStatus.PAUSED)
+    assert not bot.can_trade_paper_intents()
+
+
 def test_bot_instance_created_at_must_be_timezone_aware() -> None:
     with pytest.raises(ValidationError, match="timezone-aware"):
         BotInstance(

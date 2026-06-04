@@ -60,7 +60,7 @@ class SidecarCheckpoint(BaseModel):
         return self
 
     def can_advance_to(self, next_offset: WalOffset) -> bool:
-        return next_offset.value >= self.last_committed_wal_offset.value
+        return next_offset.value > self.last_committed_wal_offset.value
 
 
 class WalRelayCheckpoint(BaseModel):

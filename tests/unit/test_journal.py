@@ -1,3 +1,4 @@
+import operator
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -66,6 +67,24 @@ def test_wal_offset_lt_and_le() -> None:
     assert a <= WalOffset(value=1)  # reflexive via equal value
     assert not b < a
     assert not b <= a
+
+
+def test_wal_offset_gt_and_ge() -> None:
+    a = WalOffset(value=1)
+    b = WalOffset(value=2)
+    assert b > a
+    assert b >= a
+    assert b >= WalOffset(value=2)  # reflexive
+    assert not a > b
+    assert not a >= b
+
+
+def test_wal_offset_comparison_with_non_offset_raises_type_error() -> None:
+    a = WalOffset(value=1)
+    with pytest.raises(TypeError):
+        operator.lt(a, 1)
+    with pytest.raises(TypeError):
+        operator.gt(a, 1)
 
 
 # ── WalOffsetRange ─────────────────────────────────────────────────────────────

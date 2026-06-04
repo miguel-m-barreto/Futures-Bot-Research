@@ -59,7 +59,11 @@ class BotInstance(BaseModel):
         return ensure_aware_utc(value)
 
     def can_trade_paper_intents(self) -> bool:
-        return self.operational_status is OperationalStatus.RUNNING
+        return (
+            self.operational_status is OperationalStatus.RUNNING
+            and self.run_mode is RunMode.PAPER_LIVE
+            and self.capital_mode is CapitalMode.SIMULATED
+        )
 
     def can_evaluate(self) -> bool:
         return self.operational_status is not OperationalStatus.BALANCE_DEPLETED

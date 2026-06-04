@@ -128,10 +128,14 @@ def test_sidecar_checkpoint_rejects_naive_updated_at() -> None:
         )
 
 
-def test_can_advance_to_accepts_same_and_forward_offset() -> None:
+def test_can_advance_to_accepts_strictly_forward_offset() -> None:
     cp = _checkpoint(offset=10)
-    assert cp.can_advance_to(WalOffset(value=10))
     assert cp.can_advance_to(WalOffset(value=11))
+
+
+def test_can_advance_to_rejects_same_offset() -> None:
+    cp = _checkpoint(offset=10)
+    assert not cp.can_advance_to(WalOffset(value=10))
 
 
 def test_can_advance_to_rejects_backwards_movement() -> None:

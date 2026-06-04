@@ -255,13 +255,27 @@ class LocalJsonlWal:
         self._active_file = self._segment_path(
             self._active_segment_id
         ).open("a", encoding="utf-8")
-        if not open_segs:
-            self._save_metadata(self.current_segment_metadata())
+        # Always persist the active-segment metadata here — after all integrity
+        # checks — so that:
+        #   (a) a new WAL gets its initial OPEN metadata written, and
+        #   (b) a recovered OPEN segment gets corrected metadata written only
+        #       when the full WAL is globally valid.  If any integrity check
+        #       raised above, this line is never reached.
+        self._save_metadata(self.current_segment_metadata())
         return self
 
     def _recover_open_segment(self, meta: WalSegmentMetadata) -> None:
+        # Pass metadata=None: JSONL is ground truth for OPEN segments.
+        # A crash between JSONL write/fsync and the metadata atomic rename
+        # leaves the JSONL ahead of metadata; that is an expected crash window,
+        # not corruption.  Per-record checks (hash, run_id, offset continuity)
+        # still run; only the stale count/range/bytes cross-check is skipped.
+        #
+        # NOTE: no disk write happens here.  open() saves corrected OPEN
+        # metadata only after all startup integrity checks pass.  This ensures
+        # a globally-invalid WAL (e.g. offset gap) does not mutate any file.
         records, actual_byte_count = self._read_segment_records(
-            meta.segment_id, metadata=meta
+            meta.segment_id, metadata=None
         )
         self._active_event_count = len(records)
         self._active_byte_count = actual_byte_count
@@ -635,11 +649,23 @@ class LocalJsonlWal:
 
     def _do_seal(self, sealed_at: datetime) -> WalSegmentMetadata:
         """Flush, close, and finalize metadata for the active segment."""
-        self._active_file.flush()
-        if self._config.fsync_on_append:
-            with contextlib.suppress(OSError):
+        flush_error: Exception | None = None
+        try:
+            self._active_file.flush()
+            if self._config.fsync_on_append:
                 os.fsync(self._active_file.fileno())
-        self._active_file.close()
+        except Exception as exc:
+            flush_error = exc
+        finally:
+            with contextlib.suppress(Exception):
+                self._active_file.close()
+        if flush_error is not None:
+            # Mark the WAL unavailable so that subsequent append() calls return
+            # REJECTED_WAL_UNAVAILABLE instead of hitting a raw closed-file error.
+            self._closed = True
+            raise LocalWalError(
+                "WAL seal failed: could not flush/fsync active segment"
+            ) from flush_error
 
         # Guarantee sealed_at >= created_at even under clock skew.
         safe_sealed_at = max(sealed_at, self._active_segment_created_at)

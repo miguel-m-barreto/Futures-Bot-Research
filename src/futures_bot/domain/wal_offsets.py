@@ -21,11 +21,25 @@ class WalOffset(BaseModel):
     def is_before_or_equal(self, other: WalOffset) -> bool:
         return self.value <= other.value
 
-    def __lt__(self, other: WalOffset) -> bool:
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, WalOffset):
+            return NotImplemented  # type: ignore[return-value]
         return self.value < other.value
 
-    def __le__(self, other: WalOffset) -> bool:
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, WalOffset):
+            return NotImplemented  # type: ignore[return-value]
         return self.value <= other.value
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, WalOffset):
+            return NotImplemented  # type: ignore[return-value]
+        return self.value > other.value
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, WalOffset):
+            return NotImplemented  # type: ignore[return-value]
+        return self.value >= other.value
 
 
 class WalOffsetRange(BaseModel):

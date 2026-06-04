@@ -25,13 +25,14 @@ from futures_bot.domain.ids import (
     ProducerId,
     RunId,
 )
-from futures_bot.domain.journal import JournalRecord
-from futures_bot.domain.wal import WalAppendStatus, WalSegmentStatus
+from futures_bot.domain.journal import JournalRecord, WalOffset
+from futures_bot.domain.wal import WalAppendStatus, WalSegmentMetadata, WalSegmentStatus
 from futures_bot.infrastructure.wal.local_jsonl import (
     LocalJsonlWal,
     LocalJsonlWalConfig,
     LocalWalCorruptionError,
     LocalWalError,
+    _compute_payload_hash,
 )
 
 # ── Fixtures / helpers ─────────────────────────────────────────────────────────
@@ -439,7 +440,12 @@ def test_corrupted_sealed_segment_raises_on_iter_records(tmp_path: Path) -> None
     wal2.close()
 
 
-def test_metadata_event_count_mismatch_raises_on_open(tmp_path: Path) -> None:
+def test_open_segment_stale_event_count_in_metadata_is_corrected_on_open(
+    tmp_path: Path,
+) -> None:
+    # Simulates the crash window: metadata says event_count=99 but the JSONL
+    # has only 1 record.  JSONL is ground truth for OPEN segments; recovery
+    # must succeed and correct the on-disk metadata rather than raising.
     cfg = _cfg(tmp_path)
 
     wal = LocalJsonlWal.open(cfg)
@@ -447,16 +453,16 @@ def test_metadata_event_count_mismatch_raises_on_open(tmp_path: Path) -> None:
     seg_id = wal.current_segment_metadata().segment_id
     wal.close()
 
-    # Tamper with the metadata to report a wrong event_count.
     meta_path = tmp_path / "metadata" / f"{seg_id}.json"
     data = _json.loads(meta_path.read_text(encoding="utf-8"))
     data["event_count"] = 99
-    # Must also clear offset_range to avoid event_count != range.count conflict.
     data["offset_range"] = None
     meta_path.write_text(_json.dumps(data), encoding="utf-8")
 
-    with pytest.raises(LocalWalCorruptionError):
-        LocalJsonlWal.open(cfg)
+    wal2 = LocalJsonlWal.open(cfg)
+    meta = wal2.current_segment_metadata()
+    assert meta.event_count == 1
+    wal2.close()
 
 
 # ── Safety ─────────────────────────────────────────────────────────────────────
@@ -559,11 +565,16 @@ def test_sealed_metadata_event_count_mismatch_raises_on_open(tmp_path: Path) -> 
         LocalJsonlWal.open(cfg)
 
 
-def test_open_segment_payload_bytes_mismatch_raises_on_open(tmp_path: Path) -> None:
+def test_open_segment_stale_payload_bytes_in_metadata_is_corrected_on_open(
+    tmp_path: Path,
+) -> None:
+    # Same crash-window scenario: metadata payload_bytes is wrong but JSONL is
+    # intact.  Recovery derives byte count from JSONL and corrects metadata.
     cfg = _cfg(tmp_path)
     wal = LocalJsonlWal.open(cfg)
     wal.append(_event("evt-1"))
     seg_id = wal.current_segment_metadata().segment_id
+    actual_bytes = wal.current_segment_metadata().payload_bytes
     wal.close()
 
     meta_path = tmp_path / "metadata" / f"{seg_id}.json"
@@ -571,8 +582,9 @@ def test_open_segment_payload_bytes_mismatch_raises_on_open(tmp_path: Path) -> N
     data["payload_bytes"] = data["payload_bytes"] + 9999
     meta_path.write_text(_json.dumps(data), encoding="utf-8")
 
-    with pytest.raises(LocalWalCorruptionError):
-        LocalJsonlWal.open(cfg)
+    wal2 = LocalJsonlWal.open(cfg)
+    assert wal2.current_segment_metadata().payload_bytes == actual_bytes
+    wal2.close()
 
 
 def test_run_id_mismatch_raises_on_iter_records(tmp_path: Path) -> None:
@@ -1360,3 +1372,256 @@ def test_close_is_idempotent(tmp_path: Path) -> None:
     wal.append(_event("evt-1"))
     wal.close()
     wal.close()  # second call must not raise
+
+
+# ── _do_seal error handling ───────────────────────────────────────────────────
+
+
+def test_append_after_failed_seal_returns_rejected_unavailable(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+
+    wal._active_file = _FlushFailFile()  # type: ignore[assignment]
+
+    with pytest.raises(LocalWalError):
+        wal.seal_current_segment()
+
+    # WAL must be marked unavailable; append must not raise a raw I/O error.
+    result = wal.append(_event("evt-2"))
+    assert result.status is WalAppendStatus.REJECTED_WAL_UNAVAILABLE
+
+
+def test_close_after_failed_seal_is_idempotent(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+
+    wal._active_file = _FlushFailFile()  # type: ignore[assignment]
+
+    with pytest.raises(LocalWalError):
+        wal.seal_current_segment()
+
+    wal.close()   # must not raise
+    wal.close()   # second call must also not raise
+
+
+def test_seal_raises_local_wal_error_on_flush_failure(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+
+    wal._active_file = _FlushFailFile()  # type: ignore[assignment]
+
+    with pytest.raises(LocalWalError):
+        wal.seal_current_segment()
+
+
+def test_seal_does_not_write_sealed_metadata_on_flush_failure(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+
+    wal._active_file = _FlushFailFile()  # type: ignore[assignment]
+
+    with pytest.raises(LocalWalError):
+        wal.seal_current_segment()
+
+    meta_path = tmp_path / "metadata" / f"{seg_id}.json"
+    saved = WalSegmentMetadata.model_validate_json(meta_path.read_text(encoding="utf-8"))
+    assert saved.status is WalSegmentStatus.OPEN
+
+
+# ── OPEN segment JSONL-ahead-of-metadata recovery ────────────────────────────
+
+
+def _append_extra_record_to_jsonl(
+    cfg: LocalJsonlWalConfig,
+    seg_id: object,
+    offset: int,
+    event_id: str,
+    tmp_path: Path,
+) -> None:
+    """Write a valid extra JournalRecord line directly to the JSONL file."""
+    evt = _event(event_id)
+    record = JournalRecord(
+        run_id=cfg.run_id,
+        producer_id=cfg.producer_id,
+        wal_offset=WalOffset(value=offset),
+        event=evt,
+        recorded_at=datetime(2026, 1, 1, tzinfo=UTC),
+        payload_hash=_compute_payload_hash(evt),
+        record_size_bytes=len(evt.model_dump_json().encode()),
+    )
+    jsonl_path = tmp_path / "segments" / f"{seg_id}.jsonl"
+    with jsonl_path.open("a", encoding="utf-8") as fh:
+        fh.write(record.model_dump_json() + "\n")
+
+
+def test_open_segment_jsonl_ahead_of_metadata_recovers_successfully(
+    tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    # Simulate crash: extra record in JSONL but metadata still shows 1 record.
+    _append_extra_record_to_jsonl(cfg, seg_id, offset=1, event_id="evt-2", tmp_path=tmp_path)
+
+    wal2 = LocalJsonlWal.open(cfg)
+    meta = wal2.current_segment_metadata()
+    assert meta.event_count == 2
+    assert meta.offset_range is not None
+    assert meta.offset_range.first.value == 0
+    assert meta.offset_range.last.value == 1
+    wal2.close()
+
+
+def test_open_segment_jsonl_ahead_corrects_metadata_on_disk(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    _append_extra_record_to_jsonl(cfg, seg_id, offset=1, event_id="evt-2", tmp_path=tmp_path)
+
+    LocalJsonlWal.open(cfg).close()
+
+    meta_path = tmp_path / "metadata" / f"{seg_id}.json"
+    saved = WalSegmentMetadata.model_validate_json(meta_path.read_text(encoding="utf-8"))
+    assert saved.event_count == 2
+    assert saved.offset_range is not None
+    assert saved.offset_range.last.value == 1
+
+
+def test_append_after_jsonl_ahead_recovery_uses_next_offset(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    _append_extra_record_to_jsonl(cfg, seg_id, offset=1, event_id="evt-2", tmp_path=tmp_path)
+
+    wal2 = LocalJsonlWal.open(cfg)
+    result = wal2.append(_event("evt-3"))
+    wal2.close()
+
+    assert result.record is not None
+    assert result.record.wal_offset.value == 2
+
+
+def test_open_segment_corrupt_extra_record_in_jsonl_raises(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    jsonl_path = tmp_path / "segments" / f"{seg_id}.jsonl"
+    with jsonl_path.open("a", encoding="utf-8") as fh:
+        fh.write("not-valid-json\n")
+
+    with pytest.raises(LocalWalCorruptionError):
+        LocalJsonlWal.open(cfg)
+
+
+def test_open_segment_jsonl_ahead_globally_contiguous_with_sealed_recovers(
+    tmp_path: Path,
+) -> None:
+    # Sprint scenario: sealed segment covers offset 0; OPEN segment JSONL has
+    # a record at offset 1 but its metadata is stale/empty (crash window).
+    # The global offset stream is contiguous, so open() must succeed.
+    cfg = _cfg(tmp_path, segment_max_events=1)
+
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-0"))  # offset 0; max_events=1 triggers rollover
+    seg2_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    # Simulate crash: record at offset 1 in segment-2 JSONL, metadata still empty.
+    _append_extra_record_to_jsonl(cfg, seg2_id, offset=1, event_id="evt-1", tmp_path=tmp_path)
+
+    wal2 = LocalJsonlWal.open(cfg)
+    meta = wal2.current_segment_metadata()
+    assert meta.event_count == 1
+    assert meta.offset_range is not None
+    assert meta.offset_range.first.value == 1
+    assert meta.offset_range.last.value == 1
+
+    result = wal2.append(_event("evt-2"))
+    wal2.close()
+    assert result.record is not None
+    assert result.record.wal_offset.value == 2
+
+
+def test_globally_invalid_open_segment_does_not_mutate_metadata(tmp_path: Path) -> None:
+    # Sprint scenario: sealed segment covers offset 0; OPEN segment JSONL has
+    # a record at offset 5 (gap, should be 1).  open() must raise and leave
+    # ALL metadata files byte-for-byte unchanged.
+    cfg = _cfg(tmp_path, segment_max_events=1)
+
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-0"))  # offset 0; rollover → segment-1 sealed
+    seg2_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    meta_dir = tmp_path / "metadata"
+    before = {p.name: p.read_bytes() for p in sorted(meta_dir.glob("*.json"))}
+
+    # Append a valid-looking record at wrong global offset 5.
+    _append_extra_record_to_jsonl(cfg, seg2_id, offset=5, event_id="evt-bad", tmp_path=tmp_path)
+
+    with pytest.raises(LocalWalCorruptionError):
+        LocalJsonlWal.open(cfg)
+
+    after = {p.name: p.read_bytes() for p in sorted(meta_dir.glob("*.json"))}
+    assert before == after, "metadata files were mutated despite a failed open()"
+
+
+def test_corrupt_open_segment_jsonl_does_not_mutate_metadata(tmp_path: Path) -> None:
+    # A corrupt extra JSONL line must raise LocalWalCorruptionError without
+    # overwriting any metadata file.
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    meta_dir = tmp_path / "metadata"
+    before = {p.name: p.read_bytes() for p in sorted(meta_dir.glob("*.json"))}
+
+    jsonl_path = tmp_path / "segments" / f"{seg_id}.jsonl"
+    with jsonl_path.open("a", encoding="utf-8") as fh:
+        fh.write("not-valid-json\n")
+
+    with pytest.raises(LocalWalCorruptionError):
+        LocalJsonlWal.open(cfg)
+
+    after = {p.name: p.read_bytes() for p in sorted(meta_dir.glob("*.json"))}
+    assert before == after, "metadata files were mutated despite a corrupt OPEN segment"
+
+
+# ── EventJournalPort conformance ──────────────────────────────────────────────
+
+
+def test_local_jsonl_wal_conforms_to_event_journal_port(tmp_path: Path) -> None:
+    from futures_bot.ports.event_journal import EventJournalPort  # noqa: PLC0415
+
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    required = (
+        "append",
+        "current_segment_metadata",
+        "list_segment_metadata",
+        "seal_current_segment",
+        "iter_records",
+        "read_segment",
+        "close",
+    )
+    for method in required:
+        assert callable(getattr(wal, method, None)), f"missing port method: {method}"
+    wal.close()
+
+    # Pyright verifies this assignment statically; keep as a reference.
+    _journal: EventJournalPort = wal  # type: ignore[assignment]
