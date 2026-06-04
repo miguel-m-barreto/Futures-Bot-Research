@@ -501,3 +501,77 @@ def test_backpressure_critical_states_may_still_allow_exits_and_protective() -> 
         )
         assert d.allow_exits is True
         assert d.allow_protective_actions is True
+
+
+# ── GC authority guard ─────────────────────────────────────────────────────────
+
+
+def test_wal_relay_checkpoint_with_gc_required_raises() -> None:
+    with pytest.raises(ValidationError, match="WAL_RELAY"):
+        SidecarCheckpoint(
+            sidecar_id=SidecarId("relay-1"),
+            sidecar_kind=SidecarKind.WAL_RELAY,
+            run_id=RunId("run-1"),
+            last_committed_wal_offset=WalOffset(value=0),
+            updated_at=_utc(),
+            is_required_for_wal_gc=True,
+        )
+
+
+def test_wal_relay_checkpoint_without_gc_required_is_valid() -> None:
+    cp = SidecarCheckpoint(
+        sidecar_id=SidecarId("relay-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=0),
+        updated_at=_utc(),
+        is_required_for_wal_gc=False,
+    )
+    assert cp.is_required_for_wal_gc is False
+
+
+def test_db_writer_checkpoint_with_gc_required_is_valid() -> None:
+    cp = SidecarCheckpoint(
+        sidecar_id=SidecarId("db-1"),
+        sidecar_kind=SidecarKind.DB_WRITER,
+        run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=0),
+        updated_at=_utc(),
+        is_required_for_wal_gc=True,
+    )
+    assert cp.is_required_for_wal_gc is True
+
+
+# ── ARCHIVED guard in decide_wal_gc ───────────────────────────────────────────
+
+
+def _archived_segment() -> WalSegmentMetadata:
+    return WalSegmentMetadata(
+        segment_id=WalSegmentId("seg-archived"),
+        run_id=RunId("run-1"),
+        status=WalSegmentStatus.ARCHIVED,
+        offset_range=WalOffsetRange(
+            first=WalOffset(value=0), last=WalOffset(value=4)
+        ),
+        created_at=_utc(0),
+        sealed_at=_utc(1),
+        event_count=5,
+    )
+
+
+def test_gc_archived_segment_is_kept() -> None:
+    decision = decide_wal_gc(_archived_segment(), _required_checkpoints([9999]), _utc())
+    assert decision.action is WalGcAction.KEEP
+    assert decision.eligible is False
+    assert "ARCHIVED" in decision.reason
+
+
+def test_gc_archived_segment_kept_regardless_of_delete_flag() -> None:
+    for flag in (True, False):
+        decision = decide_wal_gc(
+            _archived_segment(),
+            _required_checkpoints([9999]),
+            _utc(),
+            archive_instead_of_delete=flag,
+        )
+        assert decision.action is WalGcAction.KEEP

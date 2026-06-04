@@ -250,12 +250,13 @@ class LocalJsonlWal:
         self._validate_segment_index_continuity(all_meta)
         self._validate_global_offset_continuity(self.list_segment_metadata())
 
-        if not open_segs:
-            self._save_metadata(self.current_segment_metadata())
-
+        # Create JSONL file before writing metadata so a crash between the two
+        # leaves a detectable orphan JSONL rather than orphan metadata.
         self._active_file = self._segment_path(
             self._active_segment_id
         ).open("a", encoding="utf-8")
+        if not open_segs:
+            self._save_metadata(self.current_segment_metadata())
         return self
 
     def _recover_open_segment(self, meta: WalSegmentMetadata) -> None:
@@ -278,9 +279,24 @@ class LocalJsonlWal:
         return self._metadata_dir / f"{segment_id}.json"
 
     def _save_metadata(self, meta: WalSegmentMetadata) -> None:
-        self._metadata_path(meta.segment_id).write_text(
-            meta.model_dump_json(), encoding="utf-8"
-        )
+        final_path = self._metadata_path(meta.segment_id)
+        tmp_path = final_path.with_suffix(".tmp")
+        try:
+            tmp_path.write_bytes(meta.model_dump_json().encode("utf-8"))
+            if self._config.fsync_on_append:
+                with tmp_path.open("rb") as fh:
+                    os.fsync(fh.fileno())
+            tmp_path.replace(final_path)
+            if self._config.fsync_on_append:
+                dirfd = os.open(str(self._metadata_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dirfd)
+                finally:
+                    os.close(dirfd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+            raise
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -372,8 +388,10 @@ class LocalJsonlWal:
         self._active_byte_count = 0
         self._active_first_offset = None
         self._active_last_offset = None
-        self._save_metadata(self.current_segment_metadata())
+        # JSONL file created before metadata so a crash between the two leaves
+        # a detectable orphan JSONL rather than orphan metadata.
         self._active_file = self._segment_path(new_id).open("a", encoding="utf-8")
+        self._save_metadata(self.current_segment_metadata())
         return sealed_meta
 
     def iter_records(self) -> Iterator[JournalRecord]:
@@ -405,16 +423,26 @@ class LocalJsonlWal:
 
         Subsequent appends return REJECTED_WAL_UNAVAILABLE.
         The active segment is left OPEN in metadata; recovery can resume it.
+        Raises LocalWalError if flush or fsync fails; the file is always
+        closed regardless.
         """
         if self._closed:
             return
         self._closed = True
-        with contextlib.suppress(Exception):
+        flush_error: Exception | None = None
+        try:
             self._active_file.flush()
             if self._config.fsync_on_append:
-                with contextlib.suppress(OSError):
-                    os.fsync(self._active_file.fileno())
-            self._active_file.close()
+                os.fsync(self._active_file.fileno())
+        except Exception as exc:
+            flush_error = exc
+        finally:
+            with contextlib.suppress(Exception):
+                self._active_file.close()
+        if flush_error is not None:
+            raise LocalWalError(
+                "WAL close failed: could not flush/fsync active segment"
+            ) from flush_error
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -548,6 +576,13 @@ class LocalJsonlWal:
                     f"producer_id mismatch at line {line_num} in {path}: "
                     f"expected {self._config.producer_id!r}, got {record.producer_id!r}"
                 )
+            expected_hash = _compute_payload_hash(record.event)
+            if record.payload_hash != expected_hash:
+                raise LocalWalCorruptionError(
+                    f"payload_hash mismatch at line {line_num} in {path}: "
+                    f"record has {record.payload_hash!r}, "
+                    f"recomputed {expected_hash!r}"
+                )
             if records:
                 expected = records[-1].wal_offset.value + 1
                 if record.wal_offset.value != expected:
@@ -646,5 +681,7 @@ class LocalJsonlWal:
         self._active_first_offset = None
         self._active_last_offset = None
 
-        self._save_metadata(self.current_segment_metadata())
+        # JSONL file created before metadata so a crash between the two leaves
+        # a detectable orphan JSONL rather than orphan metadata.
         self._active_file = self._segment_path(new_id).open("a", encoding="utf-8")
+        self._save_metadata(self.current_segment_metadata())

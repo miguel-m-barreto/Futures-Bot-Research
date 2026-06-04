@@ -22,6 +22,7 @@ from futures_bot.infrastructure.wal.local_jsonl import (
     LocalJsonlWal,
     LocalJsonlWalConfig,
     LocalWalCorruptionError,
+    LocalWalError,
 )
 
 # ── Fixtures / helpers ─────────────────────────────────────────────────────────
@@ -1161,3 +1162,150 @@ def test_no_segment_files_are_deleted_on_rollover(tmp_path: Path) -> None:
 
     # At least 2 sealed + 1 open demonstrates multiple rollovers occurred.
     assert len(meta_list) >= 3
+
+
+# ── Payload hash verification ─────────────────────────────────────────────────
+
+
+def _tamper_payload_hash_in_segment(
+    jsonl_path: Path,
+    meta_path: Path,
+    line_index: int = 0,
+) -> None:
+    """Replace payload_hash with an all-zeros hex string; update metadata bytes."""
+    lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    data = _json.loads(lines[line_index])
+    data["payload_hash"] = "0" * 64  # wrong but valid-length SHA-256 hex
+    lines[line_index] = _json.dumps(data)
+    new_content = "\n".join(lines) + "\n"
+    jsonl_path.write_text(new_content, encoding="utf-8")
+    # Update metadata payload_bytes so that check does not fire before the hash check.
+    meta_data = _json.loads(meta_path.read_text(encoding="utf-8"))
+    meta_data["payload_bytes"] = len(new_content.encode("utf-8"))
+    meta_path.write_text(_json.dumps(meta_data), encoding="utf-8")
+
+
+def test_payload_hash_mismatch_in_sealed_raises_on_open(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, segment_max_events=2)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    wal.append(_event("evt-2"))
+    wal.append(_event("evt-3"))  # rollover: segment-1 sealed, segment-2 open
+    sealed_meta = next(
+        m for m in wal.list_segment_metadata() if m.status is WalSegmentStatus.SEALED
+    )
+    wal.close()
+
+    sealed_path = tmp_path / "segments" / f"{sealed_meta.segment_id}.jsonl"
+    meta_path = tmp_path / "metadata" / f"{sealed_meta.segment_id}.json"
+    _tamper_payload_hash_in_segment(sealed_path, meta_path)
+
+    with pytest.raises(LocalWalCorruptionError, match="payload_hash"):
+        LocalJsonlWal.open(cfg)
+
+
+def test_payload_hash_mismatch_in_open_segment_raises_on_open(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    seg_id = wal.current_segment_metadata().segment_id
+    wal.close()
+
+    jsonl_path = tmp_path / "segments" / f"{seg_id}.jsonl"
+    meta_path = tmp_path / "metadata" / f"{seg_id}.json"
+    _tamper_payload_hash_in_segment(jsonl_path, meta_path)
+
+    with pytest.raises(LocalWalCorruptionError, match="payload_hash"):
+        LocalJsonlWal.open(cfg)
+
+
+def test_payload_hash_mismatch_after_open_raises_on_iter_records(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path, segment_max_events=2)
+    wal = LocalJsonlWal.open(cfg)
+    wal.append(_event("evt-1"))
+    wal.append(_event("evt-2"))
+    wal.append(_event("evt-3"))  # rollover: sealed, open
+    sealed_meta = next(
+        m for m in wal.list_segment_metadata() if m.status is WalSegmentStatus.SEALED
+    )
+    wal.close()
+
+    wal2 = LocalJsonlWal.open(cfg)
+
+    # Corrupt the sealed segment AFTER open — must be caught lazily by iter_records.
+    sealed_path = tmp_path / "segments" / f"{sealed_meta.segment_id}.jsonl"
+    meta_path = tmp_path / "metadata" / f"{sealed_meta.segment_id}.json"
+    _tamper_payload_hash_in_segment(sealed_path, meta_path)
+
+    with pytest.raises(LocalWalCorruptionError, match="payload_hash"):
+        list(wal2.iter_records())
+    wal2.close()
+
+
+# ── Atomic metadata writes ────────────────────────────────────────────────────
+
+
+def test_no_metadata_tmp_files_remain_after_successful_append(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+    wal.close()
+
+    tmp_files = list((tmp_path / "metadata").glob("*.tmp"))
+    assert tmp_files == [], f"leftover .tmp files: {tmp_files}"
+
+
+def test_no_metadata_tmp_files_remain_after_rollover(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path, segment_max_events=2))
+    wal.append(_event("evt-1"))
+    wal.append(_event("evt-2"))
+    wal.append(_event("evt-3"))  # triggers rollover
+    wal.close()
+
+    tmp_files = list((tmp_path / "metadata").glob("*.tmp"))
+    assert tmp_files == [], f"leftover .tmp files: {tmp_files}"
+
+
+def test_no_metadata_tmp_files_remain_after_seal(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+    wal.seal_current_segment()
+    wal.close()
+
+    tmp_files = list((tmp_path / "metadata").glob("*.tmp"))
+    assert tmp_files == [], f"leftover .tmp files: {tmp_files}"
+
+
+# ── close() error handling ────────────────────────────────────────────────────
+
+
+class _FlushFailFile:
+    """Fake file object whose flush always raises."""
+
+    def flush(self) -> None:
+        raise OSError("simulated disk full")
+
+    def fileno(self) -> int:
+        return -1
+
+    def close(self) -> None:
+        pass
+
+    def write(self, s: str) -> int:
+        return len(s)
+
+
+def test_close_raises_local_wal_error_on_flush_failure(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+
+    wal._active_file = _FlushFailFile()  # type: ignore[assignment]
+
+    with pytest.raises(LocalWalError):
+        wal.close()
+
+
+def test_close_is_idempotent(tmp_path: Path) -> None:
+    wal = LocalJsonlWal.open(_cfg(tmp_path))
+    wal.append(_event("evt-1"))
+    wal.close()
+    wal.close()  # second call must not raise

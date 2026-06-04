@@ -50,6 +50,15 @@ class SidecarCheckpoint(BaseModel):
             raise ValueError("notes must be a non-empty trimmed string")
         return value
 
+    @model_validator(mode="after")
+    def _validate_relay_not_gc_required(self) -> Self:
+        if self.sidecar_kind is SidecarKind.WAL_RELAY and self.is_required_for_wal_gc:
+            raise ValueError(
+                "WAL_RELAY sidecar cannot be is_required_for_wal_gc=True: "
+                "broker publish progress is not sufficient for WAL GC authorization"
+            )
+        return self
+
     def can_advance_to(self, next_offset: WalOffset) -> bool:
         return next_offset.value >= self.last_committed_wal_offset.value
 
@@ -206,6 +215,9 @@ def decide_wal_gc(  # noqa: PLR0911
 
     if segment.status is WalSegmentStatus.DELETED:
         return _keep("segment is already DELETED")
+
+    if segment.status is WalSegmentStatus.ARCHIVED:
+        return _keep("segment is already ARCHIVED")
 
     if segment.offset_range is None:
         return _keep("segment has no offset_range")
