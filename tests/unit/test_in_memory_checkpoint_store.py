@@ -25,6 +25,7 @@ from futures_bot.infrastructure.checkpoints.in_memory import (
 from futures_bot.ports.checkpoint_store import (
     DbWriterCheckpointStorePort,
     RequiredConsumerCheckpointStorePort,
+    RequiredConsumerCheckpointWriterPort,
     WalRelayCheckpointStorePort,
 )
 
@@ -242,6 +243,23 @@ def test_db_writer_store_does_not_expose_wal_relay_methods() -> None:
 
 def test_required_store_implements_port() -> None:
     _: RequiredConsumerCheckpointStorePort = InMemoryRequiredConsumerCheckpointStore()
+
+
+def test_required_store_implements_writer_port() -> None:
+    _: RequiredConsumerCheckpointWriterPort = InMemoryRequiredConsumerCheckpointStore()
+
+
+def test_required_writer_port_accepts_db_writer_sidecar_checkpoint() -> None:
+    store: RequiredConsumerCheckpointWriterPort = InMemoryRequiredConsumerCheckpointStore()
+    store.upsert(
+        _sidecar_checkpoint(
+            sidecar_id="db-writer-consumer-1",
+            run_id="run-1",
+            offset=10,
+            required=True,
+            kind=SidecarKind.DB_WRITER,
+        )
+    )
 
 
 def test_required_store_empty_returns_empty_set() -> None:

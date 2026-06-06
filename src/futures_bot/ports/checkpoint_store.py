@@ -6,6 +6,7 @@ from futures_bot.domain.ids import ConsumerId, RunId, SidecarId
 from futures_bot.domain.sidecars import (
     DbWriterCheckpoint,
     RequiredConsumerCheckpointSet,
+    SidecarCheckpoint,
     WalRelayCheckpoint,
 )
 
@@ -60,4 +61,17 @@ class RequiredConsumerCheckpointStorePort(Protocol):
         self, run_id: RunId
     ) -> RequiredConsumerCheckpointSet:
         """Return the full required-consumer checkpoint set for the given run."""
+        ...
+
+
+class RequiredConsumerCheckpointWriterPort(Protocol):
+    """Write-side contract for required-consumer checkpoint progress.
+
+    Stores SidecarCheckpoint records because RequiredConsumerCheckpointSet is
+    the GC authority input.  This port intentionally does not expose
+    WalRelayCheckpoint or DbWriterCheckpoint.
+    """
+
+    def upsert(self, checkpoint: SidecarCheckpoint) -> None:
+        """Insert or advance one required-consumer checkpoint."""
         ...
