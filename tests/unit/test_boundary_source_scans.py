@@ -69,3 +69,82 @@ def test_in_memory_sidecar_health_store_does_not_import_forbidden_dependencies()
     )
     for name in forbidden:
         assert not any(name in line for line in lines), f"found {name!r} import"
+
+
+def test_research_domain_does_not_import_forbidden_dependencies() -> None:
+    source = (ROOT / "src/futures_bot/domain/research.py").read_text(encoding="utf-8")
+    forbidden = (
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+    )
+    for name in forbidden:
+        assert name not in source
+
+
+def test_research_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/research.py")
+    assert not any("infrastructure" in line for line in lines)
+
+
+def test_in_memory_research_store_does_not_import_forbidden_dependencies() -> None:
+    source = (
+        ROOT / "src/futures_bot/infrastructure/research/in_memory.py"
+    ).read_text(encoding="utf-8")
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "LocalJsonlWal",
+        "decide_wal_gc",
+    )
+    for name in forbidden:
+        assert name not in source
+
+
+def test_local_research_recorder_does_not_import_forbidden_dependencies() -> None:
+    source = (ROOT / "src/futures_bot/research/local.py").read_text(encoding="utf-8")
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+    )
+    for name in forbidden:
+        assert name not in source
