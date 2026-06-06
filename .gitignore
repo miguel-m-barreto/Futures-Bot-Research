@@ -1,17 +1,76 @@
+# Python bytecode/cache
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+
+# Python packaging/build outputs
 *.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+site/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test/type/lint caches
 .pytest_cache/
 .ruff_cache/
 .hypothesis/
 .pyright/
-.venv/
-venv/
-dist/
-build/
-.env
-.DS_Store
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# IDE/editor local state
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs/temp files
+*.log
+*.tmp
+*.bak
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Research/private docs intentionally not committed
 docs/
-docs
-docs/*
+
+# ML/research generated artifacts
+data/
+datasets/
+artifacts/
+outputs/
+runs/
+checkpoints/
+models/
+wandb/
+mlruns/
+tensorboard/
+lightning_logs/
+
+# Archives generated locally
+*.zip
+*.tar.gz
+*.tgz
+*.7z
