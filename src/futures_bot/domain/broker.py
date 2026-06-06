@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.ids import BrokerTopicId
+from futures_bot.domain.ids import BrokerTopicId, ConsumerId, EventId, RunId
 from futures_bot.domain.journal import JournalRecord, WalOffset
+from futures_bot.domain.time import ensure_aware_utc
 
 
 class BrokerPublishStatus(StrEnum):
@@ -93,6 +95,24 @@ class KafkaConsumedRecord(BaseModel):
         if self.kafka_offset.topic != self.topic:
             raise ValueError("kafka_offset.topic must equal topic")
         return self
+
+
+class BrokerConsumerCursor(BaseModel):
+    """Durable broker-consumer resume progress after downstream commit."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    consumer_id: ConsumerId
+    kafka_offset: KafkaPartitionOffset
+    last_committed_run_id: RunId
+    last_committed_wal_offset: WalOffset
+    last_committed_event_id: EventId
+    updated_at: datetime
+
+    @field_validator("updated_at")
+    @classmethod
+    def _validate_updated_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
 
 
 class KafkaPublishAck(BaseModel):

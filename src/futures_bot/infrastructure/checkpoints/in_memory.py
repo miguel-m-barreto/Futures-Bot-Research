@@ -4,7 +4,8 @@ No DB. No filesystem. No Kafka.
 """
 from __future__ import annotations
 
-from futures_bot.domain.ids import ConsumerId, RunId, SidecarId
+from futures_bot.domain.broker import BrokerConsumerCursor
+from futures_bot.domain.ids import BrokerTopicId, ConsumerId, RunId, SidecarId
 from futures_bot.domain.sidecars import (
     DbWriterCheckpoint,
     RequiredConsumerCheckpointSet,
@@ -82,6 +83,64 @@ class InMemoryDbWriterCheckpointStore:
                     )
                 return  # idempotent: same offset, same event_id
         self._data[key] = checkpoint
+
+
+class InMemoryBrokerConsumerCursorStore:
+    """In-memory BrokerConsumerCursorStorePort implementation.
+
+    Stores broker-consumer resume progress by consumer/topic/partition. This
+    is not a WAL GC authority and intentionally exposes no relay, DB writer, or
+    sidecar checkpoint methods.
+
+    No DB code. No filesystem code. No Kafka code.
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[tuple[str, str, int], BrokerConsumerCursor] = {}
+
+    def load(
+        self, consumer_id: ConsumerId, topic: BrokerTopicId, partition: int
+    ) -> BrokerConsumerCursor | None:
+        """Return the cursor for consumer/topic/partition, or None if absent."""
+        return self._data.get((str(consumer_id), str(topic), partition))
+
+    def save(self, cursor: BrokerConsumerCursor) -> None:
+        """Persist cursor progress with per-key monotonic broker offset."""
+        if not isinstance(cursor, BrokerConsumerCursor):
+            raise TypeError("save requires a BrokerConsumerCursor")
+
+        key = (
+            str(cursor.consumer_id),
+            str(cursor.kafka_offset.topic),
+            cursor.kafka_offset.partition,
+        )
+        existing = self._data.get(key)
+        if existing is not None:
+            new_offset = cursor.kafka_offset.offset
+            old_offset = existing.kafka_offset.offset
+            if new_offset < old_offset:
+                raise ValueError(
+                    f"broker cursor offset regression: existing {old_offset}, "
+                    f"new {new_offset}"
+                )
+            if new_offset == old_offset:
+                self._validate_same_cursor_metadata(existing, cursor)
+                return
+        self._data[key] = cursor
+
+    @staticmethod
+    def _validate_same_cursor_metadata(
+        existing: BrokerConsumerCursor, new: BrokerConsumerCursor
+    ) -> None:
+        if (
+            existing.last_committed_run_id != new.last_committed_run_id
+            or existing.last_committed_wal_offset != new.last_committed_wal_offset
+            or existing.last_committed_event_id != new.last_committed_event_id
+        ):
+            raise ValueError(
+                "broker cursor conflict at same offset: run_id, wal_offset, "
+                "or event_id mismatch"
+            )
 
 
 class InMemoryRequiredConsumerCheckpointStore:

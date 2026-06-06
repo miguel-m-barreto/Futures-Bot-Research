@@ -17,6 +17,7 @@ from futures_bot.domain.ids import BotId, BrokerTopicId, ConsumerId, EventId, Pr
 from futures_bot.domain.journal import JournalRecord, WalOffset
 from futures_bot.domain.sidecars import SidecarKind
 from futures_bot.infrastructure.checkpoints.in_memory import (
+    InMemoryBrokerConsumerCursorStore,
     InMemoryDbWriterCheckpointStore,
     InMemoryRequiredConsumerCheckpointStore,
 )
@@ -108,6 +109,7 @@ def _service(
     db_store: InMemoryCommittedEventStore | None = None,
     checkpoint_store: InMemoryDbWriterCheckpointStore | None = None,
     required_store: InMemoryRequiredConsumerCheckpointStore | None = None,
+    broker_cursor_store: InMemoryBrokerConsumerCursorStore | None = None,
     is_required_for_wal_gc: bool = True,
 ) -> tuple[
     LocalDbWriterService,
@@ -123,6 +125,7 @@ def _service(
         db_store=db_store,
         checkpoint_store=checkpoint_store,
         required_checkpoint_writer=required_store,
+        broker_cursor_store=broker_cursor_store,
         is_required_for_wal_gc=is_required_for_wal_gc,
         now=_utc,
     )
@@ -178,6 +181,32 @@ def test_checkpoint_kafka_offset_uses_consumed_broker_offset_not_wal_offset() ->
     assert checkpoint.last_committed_wal_offset == WalOffset(value=12)
     assert checkpoint.kafka_offset == records[-1].kafka_offset
     assert checkpoint.kafka_offset.offset == 2
+
+
+def test_first_commit_saves_db_writer_checkpoint_and_broker_cursor() -> None:
+    cursor_store = InMemoryBrokerConsumerCursorStore()
+    service, _, checkpoint_store, _ = _service(broker_cursor_store=cursor_store)
+    records = _records_with_broker_offsets(((10, 0), (11, 1)))
+    checkpoint = service.commit_consumed_batch(records)
+    cursor = cursor_store.load(ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0)
+    assert checkpoint_store.load(ConsumerId("consumer-1"), RunId("run-1")) == checkpoint
+    assert cursor is not None
+    assert cursor.kafka_offset == records[-1].kafka_offset
+    assert cursor.last_committed_run_id == RunId("run-1")
+    assert cursor.last_committed_wal_offset == WalOffset(value=11)
+    assert cursor.last_committed_event_id == EventId("evt-11")
+
+
+def test_second_commit_advances_broker_cursor() -> None:
+    cursor_store = InMemoryBrokerConsumerCursorStore()
+    service, _, _, _ = _service(broker_cursor_store=cursor_store)
+    service.commit_consumed_batch(_records_with_broker_offsets(((10, 0), (11, 1))))
+    service.commit_consumed_batch(_records_with_broker_offsets(((12, 2), (13, 3))))
+    cursor = cursor_store.load(ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0)
+    assert cursor is not None
+    assert cursor.kafka_offset.offset == 3
+    assert cursor.last_committed_wal_offset == WalOffset(value=13)
+    assert cursor.last_committed_event_id == EventId("evt-13")
 
 
 def test_required_checkpoint_writer_receives_db_writer_checkpoint_after_commit() -> None:
@@ -239,6 +268,19 @@ def test_duplicate_same_event_conflicting_broker_offset_is_rejected() -> None:
         service.commit_consumed_batch(conflicting)
 
 
+def test_duplicate_commit_is_idempotent_and_does_not_regress_cursor() -> None:
+    cursor_store = InMemoryBrokerConsumerCursorStore()
+    service, _, _, _ = _service(broker_cursor_store=cursor_store)
+    records = _records_with_broker_offsets(((10, 0), (11, 1)))
+    existing = service.commit_consumed_batch(records)
+    duplicate = service.commit_consumed_batch(records)
+    cursor = cursor_store.load(ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0)
+    assert duplicate == existing
+    assert cursor is not None
+    assert cursor.kafka_offset.offset == 1
+    assert cursor.last_committed_wal_offset == WalOffset(value=11)
+
+
 def test_gap_after_checkpoint_raises_and_commits_nothing_new() -> None:
     service, db_store, checkpoint_store, _ = _service()
     service.commit_consumed_batch(_records(0, 1))
@@ -269,6 +311,17 @@ def test_commit_failure_does_not_upsert_required_checkpoint() -> None:
     with pytest.raises(RuntimeError, match="simulated"):
         service.commit_consumed_batch(_records(0, 1))
     assert required_store.load_required_checkpoints(RunId("run-1")).checkpoints == ()
+
+
+def test_commit_failure_does_not_save_broker_cursor() -> None:
+    cursor_store = InMemoryBrokerConsumerCursorStore()
+    service, _, _, _ = _service(
+        db_store=InMemoryCommittedEventStore(fail_next_commit=True),
+        broker_cursor_store=cursor_store,
+    )
+    with pytest.raises(RuntimeError, match="simulated"):
+        service.commit_consumed_batch(_records_with_broker_offsets(((10, 0), (11, 1))))
+    assert cursor_store.load(ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0) is None
 
 
 def test_service_does_not_import_wal_relay_checkpoint_or_gc_logic() -> None:

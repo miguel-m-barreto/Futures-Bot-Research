@@ -14,6 +14,7 @@ from futures_bot.domain.ids import BatchId, ConsumerId, RunId, SidecarId
 from futures_bot.domain.journal import JournalRecord, WalOffset
 from futures_bot.domain.sidecars import DbWriterCheckpoint, SidecarCheckpoint, SidecarKind
 from futures_bot.ports.checkpoint_store import (
+    BrokerConsumerCursorStorePort,
     DbWriterCheckpointStorePort,
     RequiredConsumerCheckpointWriterPort,
 )
@@ -58,6 +59,7 @@ class LocalDbWriterService:
         db_store: CommittedEventStorePort,
         checkpoint_store: DbWriterCheckpointStorePort,
         required_checkpoint_writer: RequiredConsumerCheckpointWriterPort | None,
+        broker_cursor_store: BrokerConsumerCursorStorePort | None = None,
         is_required_for_wal_gc: bool = True,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -65,6 +67,7 @@ class LocalDbWriterService:
         self._db_store = db_store
         self._checkpoint_store = checkpoint_store
         self._required_checkpoint_writer = required_checkpoint_writer
+        self._broker_cursor_store = broker_cursor_store
         self._is_required_for_wal_gc = is_required_for_wal_gc
         self._now: Callable[[], datetime] = now if now is not None else _utcnow
 
@@ -130,6 +133,21 @@ class LocalDbWriterService:
                     last_committed_wal_offset=last_record.wal_offset,
                     updated_at=saved_at,
                     is_required_for_wal_gc=self._is_required_for_wal_gc,
+                )
+            )
+
+        if self._broker_cursor_store is not None:
+            # These local stores are not transactional. A cursor save failure is
+            # surfaced after the DBWriter and sidecar checkpoints have already
+            # been saved; real atomicity belongs to a future real DB boundary.
+            self._broker_cursor_store.save(
+                broker_domain.BrokerConsumerCursor(
+                    consumer_id=self._consumer_id,
+                    kafka_offset=records_to_commit[-1].kafka_offset,
+                    last_committed_run_id=run_id,
+                    last_committed_wal_offset=last_record.wal_offset,
+                    last_committed_event_id=last_record.event.event_id,
+                    updated_at=saved_at,
                 )
             )
 

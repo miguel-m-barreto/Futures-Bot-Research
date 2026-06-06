@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from futures_bot.domain.ids import ConsumerId, RunId, SidecarId
+from futures_bot.domain.broker import BrokerConsumerCursor
+from futures_bot.domain.ids import BrokerTopicId, ConsumerId, RunId, SidecarId
 from futures_bot.domain.sidecars import (
     DbWriterCheckpoint,
     RequiredConsumerCheckpointSet,
@@ -46,6 +47,24 @@ class DbWriterCheckpointStorePort(Protocol):
 
     def save(self, checkpoint: DbWriterCheckpoint) -> None:
         """Persist a DB writer checkpoint."""
+        ...
+
+
+class BrokerConsumerCursorStorePort(Protocol):
+    """Persistence contract for broker-consumer resume progress.
+
+    Cursors are keyed by consumer/topic/partition and are not WAL relay,
+    DB writer, sidecar, or WAL GC authority checkpoints.
+    """
+
+    def load(
+        self, consumer_id: ConsumerId, topic: BrokerTopicId, partition: int
+    ) -> BrokerConsumerCursor | None:
+        """Return the broker cursor for consumer/topic/partition, or None."""
+        ...
+
+    def save(self, cursor: BrokerConsumerCursor) -> None:
+        """Persist broker-consumer resume progress."""
         ...
 
 

@@ -20,6 +20,7 @@ from futures_bot.domain.sidecars import SidecarKind, WalGcAction, decide_wal_gc
 from futures_bot.domain.wal import WalAppendResult, WalSegmentMetadata, WalSegmentStatus
 from futures_bot.infrastructure.broker.in_memory import InMemoryBrokerPublisher
 from futures_bot.infrastructure.checkpoints.in_memory import (
+    InMemoryBrokerConsumerCursorStore,
     InMemoryDbWriterCheckpointStore,
     InMemoryRequiredConsumerCheckpointStore,
     InMemoryWalRelayCheckpointStore,
@@ -102,6 +103,7 @@ def test_relay_broker_db_writer_and_gc_authority_flow() -> None:
     publisher = InMemoryBrokerPublisher()
     relay_store = InMemoryWalRelayCheckpointStore()
     required_store = InMemoryRequiredConsumerCheckpointStore()
+    broker_cursor_store = InMemoryBrokerConsumerCursorStore()
 
     relay = LocalWalRelayService(
         journal=journal,
@@ -137,6 +139,7 @@ def test_relay_broker_db_writer_and_gc_authority_flow() -> None:
         db_store=InMemoryCommittedEventStore(),
         checkpoint_store=InMemoryDbWriterCheckpointStore(),
         required_checkpoint_writer=required_store,
+        broker_cursor_store=broker_cursor_store,
         now=_utc,
     )
     db_checkpoint = db_writer.commit_consumed_batch(publisher.consumed_records())
@@ -145,6 +148,13 @@ def test_relay_broker_db_writer_and_gc_authority_flow() -> None:
     assert db_checkpoint.last_committed_wal_offset == WalOffset(value=11)
     assert db_checkpoint.kafka_offset == publisher.consumed_records()[-1].kafka_offset
     assert db_checkpoint.kafka_offset.offset == 1
+    cursor = broker_cursor_store.load(
+        ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0
+    )
+    assert cursor is not None
+    assert cursor.kafka_offset == db_checkpoint.kafka_offset
+    assert cursor.last_committed_run_id == RunId("run-1")
+    assert cursor.last_committed_wal_offset == WalOffset(value=11)
 
     checkpoint_set = required_store.load_required_checkpoints(RunId("run-1"))
     assert len(checkpoint_set.checkpoints) == 1
@@ -162,3 +172,83 @@ def test_relay_broker_db_writer_and_gc_authority_flow() -> None:
     segment = _sealed_segment(10, 11)
     decide_wal_gc(segment, checkpoint_set, _utc())
     assert segment.status is WalSegmentStatus.SEALED
+
+
+def test_broker_cursor_db_writer_checkpoint_and_gc_authority_across_runs() -> None:
+    publisher = InMemoryBrokerPublisher()
+    relay_store = InMemoryWalRelayCheckpointStore()
+    db_checkpoint_store = InMemoryDbWriterCheckpointStore()
+    required_store = InMemoryRequiredConsumerCheckpointStore()
+    broker_cursor_store = InMemoryBrokerConsumerCursorStore()
+    db_writer = LocalDbWriterService(
+        consumer_id=ConsumerId("consumer-1"),
+        db_store=InMemoryCommittedEventStore(),
+        checkpoint_store=db_checkpoint_store,
+        required_checkpoint_writer=required_store,
+        broker_cursor_store=broker_cursor_store,
+        now=_utc,
+    )
+
+    relay_run_1 = LocalWalRelayService(
+        journal=FakeJournal((_record(10, run_id="run-1"), _record(11, run_id="run-1"))),
+        publisher=publisher,
+        checkpoint_store=relay_store,
+        relay_id=SidecarId("relay-1"),
+        topic=BrokerTopicId("events.topic"),
+        now=_utc,
+    )
+    result_1 = relay_run_1.relay_once(max_records=10)
+    assert result_1 is not None
+    first_run_consumed = publisher.consumed_records()
+    checkpoint_1 = db_writer.commit_consumed_batch(first_run_consumed)
+
+    relay_run_2 = LocalWalRelayService(
+        journal=FakeJournal((_record(0, run_id="run-2"), _record(1, run_id="run-2"))),
+        publisher=publisher,
+        checkpoint_store=relay_store,
+        relay_id=SidecarId("relay-1"),
+        topic=BrokerTopicId("events.topic"),
+        now=_utc,
+    )
+    result_2 = relay_run_2.relay_once(max_records=10)
+    assert result_2 is not None
+    second_run_consumed = publisher.consumed_records()[len(first_run_consumed):]
+    checkpoint_2 = db_writer.commit_consumed_batch(second_run_consumed)
+
+    assert checkpoint_1 is not None
+    assert checkpoint_2 is not None
+    assert db_checkpoint_store.load(ConsumerId("consumer-1"), RunId("run-1")) == checkpoint_1
+    assert db_checkpoint_store.load(ConsumerId("consumer-1"), RunId("run-2")) == checkpoint_2
+    assert checkpoint_1.last_committed_wal_offset == WalOffset(value=11)
+    assert checkpoint_2.last_committed_wal_offset == WalOffset(value=1)
+
+    cursor = broker_cursor_store.load(
+        ConsumerId("consumer-1"), BrokerTopicId("events.topic"), 0
+    )
+    assert cursor is not None
+    assert cursor.kafka_offset.offset == 3
+    assert cursor.last_committed_run_id == RunId("run-2")
+    assert cursor.last_committed_wal_offset == WalOffset(value=1)
+
+    run_1_checkpoints = required_store.load_required_checkpoints(RunId("run-1"))
+    run_2_checkpoints = required_store.load_required_checkpoints(RunId("run-2"))
+    assert run_1_checkpoints.required_min_offset() == WalOffset(value=11)
+    assert run_2_checkpoints.required_min_offset() == WalOffset(value=1)
+    run_1_gc = decide_wal_gc(
+        _sealed_segment(10, 11, run_id="run-1"), run_1_checkpoints, _utc()
+    )
+    run_2_gc = decide_wal_gc(
+        _sealed_segment(0, 1, run_id="run-2"), run_2_checkpoints, _utc()
+    )
+    assert run_1_gc.action is WalGcAction.ARCHIVE
+    assert run_2_gc.action is WalGcAction.ARCHIVE
+
+    empty_required = InMemoryRequiredConsumerCheckpointStore().load_required_checkpoints(
+        RunId("run-2")
+    )
+    cursor_only_decision = decide_wal_gc(
+        _sealed_segment(0, 1, run_id="run-2"),
+        empty_required,
+        _utc(),
+    )
+    assert cursor_only_decision.action is WalGcAction.KEEP

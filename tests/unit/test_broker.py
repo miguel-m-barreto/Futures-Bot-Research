@@ -1,9 +1,13 @@
+import inspect
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from futures_bot.domain import broker as broker_domain
 from futures_bot.domain.broker import (
+    BrokerConsumerCursor,
     BrokerPublishStatus,
     KafkaConsumedRecord,
     KafkaPartitionOffset,
@@ -11,8 +15,19 @@ from futures_bot.domain.broker import (
     KafkaPublishRecord,
 )
 from futures_bot.domain.events import EventEnvelope, EventType
-from futures_bot.domain.ids import BotId, BrokerTopicId, EventId, ProducerId, RunId
+from futures_bot.domain.ids import (
+    BotId,
+    BrokerTopicId,
+    ConsumerId,
+    EventId,
+    ProducerId,
+    RunId,
+)
 from futures_bot.domain.journal import JournalRecord, WalOffset
+from futures_bot.domain.sidecars import (
+    RequiredConsumerCheckpointSet,
+    SidecarCheckpoint,
+)
 
 
 def _utc() -> datetime:
@@ -165,6 +180,91 @@ def test_kafka_consumed_record_has_no_db_or_checkpoint_fields() -> None:
     assert not hasattr(consumed, "last_committed_wal_offset")
 
 
+# ── BrokerConsumerCursor ─────────────────────────────────────────────────────
+
+def _broker_cursor(
+    *,
+    partition: int = 0,
+    broker_offset: int = 42,
+) -> BrokerConsumerCursor:
+    return BrokerConsumerCursor(
+        consumer_id=ConsumerId("consumer-1"),
+        kafka_offset=_kafka_offset(partition=partition, offset=broker_offset),
+        last_committed_run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=5),
+        last_committed_event_id=EventId("evt-1"),
+        updated_at=_utc(),
+    )
+
+
+def test_broker_consumer_cursor_accepts_valid_input() -> None:
+    cursor = _broker_cursor(partition=2, broker_offset=99)
+    assert cursor.consumer_id == ConsumerId("consumer-1")
+    assert cursor.kafka_offset.topic == _topic()
+    assert cursor.kafka_offset.partition == 2
+    assert cursor.kafka_offset.offset == 99
+    assert cursor.last_committed_run_id == RunId("run-1")
+    assert cursor.last_committed_wal_offset == WalOffset(value=5)
+    assert cursor.last_committed_event_id == EventId("evt-1")
+
+
+def test_broker_consumer_cursor_rejects_negative_partition() -> None:
+    with pytest.raises(ValidationError, match="partition"):
+        BrokerConsumerCursor(
+            consumer_id=ConsumerId("consumer-1"),
+            kafka_offset=KafkaPartitionOffset(topic=_topic(), partition=-1, offset=0),
+            last_committed_run_id=RunId("run-1"),
+            last_committed_wal_offset=WalOffset(value=0),
+            last_committed_event_id=EventId("evt-1"),
+            updated_at=_utc(),
+        )
+
+
+def test_broker_consumer_cursor_rejects_negative_offset() -> None:
+    with pytest.raises(ValidationError, match="offset"):
+        BrokerConsumerCursor(
+            consumer_id=ConsumerId("consumer-1"),
+            kafka_offset=KafkaPartitionOffset(topic=_topic(), partition=0, offset=-1),
+            last_committed_run_id=RunId("run-1"),
+            last_committed_wal_offset=WalOffset(value=0),
+            last_committed_event_id=EventId("evt-1"),
+            updated_at=_utc(),
+        )
+
+
+def test_broker_consumer_cursor_rejects_naive_updated_at() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        BrokerConsumerCursor(
+            consumer_id=ConsumerId("consumer-1"),
+            kafka_offset=_kafka_offset(),
+            last_committed_run_id=RunId("run-1"),
+            last_committed_wal_offset=WalOffset(value=0),
+            last_committed_event_id=EventId("evt-1"),
+            updated_at=datetime(2026, 1, 1),
+        )
+
+
+def test_broker_consumer_cursor_is_independent_from_db_writer_checkpoint() -> None:
+    cursor = _broker_cursor()
+    assert not hasattr(cursor, "db_transaction_id")
+    assert not hasattr(cursor, "batch_id")
+    assert not hasattr(cursor, "run_id")
+    assert cursor.last_committed_run_id == RunId("run-1")
+
+
+def test_broker_consumer_cursor_is_not_sidecar_checkpoint() -> None:
+    cursor = _broker_cursor()
+    assert not isinstance(cursor, SidecarCheckpoint)
+
+
+def test_broker_consumer_cursor_cannot_appear_in_required_checkpoint_set() -> None:
+    with pytest.raises(ValidationError):
+        RequiredConsumerCheckpointSet(
+            run_id=RunId("run-1"),
+            checkpoints=(_broker_cursor(),),  # type: ignore[arg-type]
+        )
+
+
 # ── KafkaPublishAck ────────────────────────────────────────────────────────────
 
 def test_kafka_publish_ack_published_requires_kafka_offset() -> None:
@@ -231,3 +331,22 @@ def test_kafka_publish_ack_does_not_imply_db_commit() -> None:
     assert not hasattr(ack, "db_transaction_id")
     assert not hasattr(ack, "batch_id")
     assert not hasattr(ack, "last_committed_wal_offset")
+
+
+def test_broker_domain_does_not_import_db_writer_checkpoint_store_wal_or_gc() -> None:
+    source_path = inspect.getsourcefile(broker_domain)
+    assert source_path is not None
+    source = Path(source_path).read_text()
+    import_lines = [
+        line for line in source.splitlines()
+        if line.strip().startswith(("import ", "from "))
+    ]
+    forbidden = (
+        "db_writer",
+        "checkpoint",
+        "LocalJsonlWal",
+        "local_jsonl",
+        "decide_wal_gc",
+    )
+    for name in forbidden:
+        assert not any(name in line for line in import_lines), f"found {name!r} import"
