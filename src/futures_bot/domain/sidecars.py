@@ -6,7 +6,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.broker import KafkaPartitionOffset
+from futures_bot.domain.broker import BrokerConsumerCursor, KafkaPartitionOffset
 from futures_bot.domain.ids import BatchId, ConsumerId, EventId, RunId, SidecarId, WalSegmentId
 from futures_bot.domain.journal import WalOffset
 from futures_bot.domain.time import ensure_aware_utc
@@ -23,6 +23,52 @@ class SidecarKind(StrEnum):
     RECONCILER = "RECONCILER"
     MARKET_DATA_COLLECTOR = "MARKET_DATA_COLLECTOR"
     MARKET_STATE_BUILDER = "MARKET_STATE_BUILDER"
+
+
+class SidecarLifecycleStatus(StrEnum):
+    CONFIGURED = "CONFIGURED"
+    RUNNING = "RUNNING"
+    DEGRADED = "DEGRADED"
+    STOPPED = "STOPPED"
+    FAILED = "FAILED"
+
+
+class SidecarHealthLevel(StrEnum):
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    UNHEALTHY = "UNHEALTHY"
+    UNKNOWN = "UNKNOWN"
+
+
+class SidecarHealthSnapshot(BaseModel):
+    """Local sidecar observability snapshot. Not a WAL GC authority."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
+
+    sidecar_id: SidecarId
+    sidecar_kind: SidecarKind
+    lifecycle_status: SidecarLifecycleStatus
+    health: SidecarHealthLevel
+    checked_at: datetime
+    run_id: RunId | None = None
+    last_processed_wal_offset: WalOffset | None = None
+    broker_cursor: BrokerConsumerCursor | None = None
+    message: str | None = None
+    error: str | None = None
+
+    @field_validator("checked_at")
+    @classmethod
+    def _validate_checked_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("message", "error")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or value != value.strip():
+            raise ValueError("message/error must be non-empty trimmed text")
+        return value
 
 
 class SidecarCheckpoint(BaseModel):

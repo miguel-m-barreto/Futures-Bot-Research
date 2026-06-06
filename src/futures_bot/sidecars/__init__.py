@@ -1,0 +1,1 @@
+"""Local sidecar adapter package."""

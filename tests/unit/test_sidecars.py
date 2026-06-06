@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.broker import KafkaPartitionOffset
+from futures_bot.domain.broker import BrokerConsumerCursor, KafkaPartitionOffset
 from futures_bot.domain.ids import (
     BatchId,
     BrokerTopicId,
@@ -20,7 +20,10 @@ from futures_bot.domain.sidecars import (
     RuntimeBackpressureDecision,
     RuntimeBackpressureState,
     SidecarCheckpoint,
+    SidecarHealthLevel,
+    SidecarHealthSnapshot,
     SidecarKind,
+    SidecarLifecycleStatus,
     WalGcAction,
     WalGcDecision,
     WalRelayCheckpoint,
@@ -39,6 +42,17 @@ def _topic() -> BrokerTopicId:
 
 def _kafka_offset(offset: int = 42) -> KafkaPartitionOffset:
     return KafkaPartitionOffset(topic=_topic(), partition=0, offset=offset)
+
+
+def _broker_cursor(offset: int = 42) -> BrokerConsumerCursor:
+    return BrokerConsumerCursor(
+        consumer_id=ConsumerId("consumer-1"),
+        kafka_offset=_kafka_offset(offset),
+        last_committed_run_id=RunId("run-1"),
+        last_committed_wal_offset=WalOffset(value=offset),
+        last_committed_event_id=EventId(f"evt-{offset}"),
+        updated_at=_utc(),
+    )
 
 
 def _checkpoint(
@@ -94,6 +108,101 @@ def _deleted_segment() -> WalSegmentMetadata:
         sealed_at=_utc(1),
         event_count=5,
     )
+
+
+# ── SidecarHealthSnapshot ─────────────────────────────────────────────────────
+
+def test_health_snapshot_accepts_valid_input() -> None:
+    snapshot = SidecarHealthSnapshot(
+        sidecar_id=SidecarId("sidecar-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        lifecycle_status=SidecarLifecycleStatus.CONFIGURED,
+        health=SidecarHealthLevel.UNKNOWN,
+        checked_at=_utc(),
+        message="configured",
+    )
+    assert snapshot.health is SidecarHealthLevel.UNKNOWN
+    assert snapshot.message == "configured"
+
+
+def test_health_snapshot_can_represent_wal_relay_running_healthy() -> None:
+    snapshot = SidecarHealthSnapshot(
+        sidecar_id=SidecarId("relay-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        lifecycle_status=SidecarLifecycleStatus.RUNNING,
+        health=SidecarHealthLevel.HEALTHY,
+        checked_at=_utc(),
+        run_id=RunId("run-1"),
+        last_processed_wal_offset=WalOffset(value=10),
+    )
+    assert snapshot.sidecar_kind is SidecarKind.WAL_RELAY
+    assert snapshot.last_processed_wal_offset == WalOffset(value=10)
+
+
+def test_health_snapshot_can_represent_db_writer_with_broker_cursor() -> None:
+    cursor = _broker_cursor(12)
+    snapshot = SidecarHealthSnapshot(
+        sidecar_id=SidecarId("dbw-1"),
+        sidecar_kind=SidecarKind.DB_WRITER,
+        lifecycle_status=SidecarLifecycleStatus.RUNNING,
+        health=SidecarHealthLevel.HEALTHY,
+        checked_at=_utc(),
+        run_id=RunId("run-1"),
+        last_processed_wal_offset=WalOffset(value=12),
+        broker_cursor=cursor,
+    )
+    assert snapshot.broker_cursor == cursor
+
+
+def test_health_snapshot_rejects_naive_checked_at() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        SidecarHealthSnapshot(
+            sidecar_id=SidecarId("sidecar-1"),
+            sidecar_kind=SidecarKind.WAL_RELAY,
+            lifecycle_status=SidecarLifecycleStatus.RUNNING,
+            health=SidecarHealthLevel.HEALTHY,
+            checked_at=datetime(2026, 1, 1),
+        )
+
+
+def test_health_snapshot_is_not_sidecar_checkpoint() -> None:
+    snapshot = SidecarHealthSnapshot(
+        sidecar_id=SidecarId("relay-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        lifecycle_status=SidecarLifecycleStatus.RUNNING,
+        health=SidecarHealthLevel.HEALTHY,
+        checked_at=_utc(),
+    )
+    assert not isinstance(snapshot, SidecarCheckpoint)
+
+
+def test_health_snapshot_cannot_appear_in_required_checkpoint_set() -> None:
+    snapshot = SidecarHealthSnapshot(
+        sidecar_id=SidecarId("relay-1"),
+        sidecar_kind=SidecarKind.WAL_RELAY,
+        lifecycle_status=SidecarLifecycleStatus.RUNNING,
+        health=SidecarHealthLevel.HEALTHY,
+        checked_at=_utc(),
+    )
+    with pytest.raises(ValidationError):
+        RequiredConsumerCheckpointSet(
+            run_id=RunId("run-1"),
+            checkpoints=(snapshot,),  # type: ignore[arg-type]
+        )
+
+
+def test_health_snapshot_does_not_authorize_gc() -> None:
+    SidecarHealthSnapshot(
+        sidecar_id=SidecarId("dbw-1"),
+        sidecar_kind=SidecarKind.DB_WRITER,
+        lifecycle_status=SidecarLifecycleStatus.RUNNING,
+        health=SidecarHealthLevel.HEALTHY,
+        checked_at=_utc(),
+        last_processed_wal_offset=WalOffset(value=999),
+    )
+    empty = RequiredConsumerCheckpointSet(run_id=RunId("run-1"))
+    decision = decide_wal_gc(_sealed_segment(0, 4), empty, _utc())
+    assert decision.action is WalGcAction.KEEP
 
 
 # ── SidecarCheckpoint ──────────────────────────────────────────────────────────
