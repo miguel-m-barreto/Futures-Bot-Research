@@ -1,6 +1,12 @@
+import inspect
 from datetime import UTC, datetime
+from pathlib import Path
 
-from futures_bot.domain.broker import BrokerPublishStatus, KafkaPublishRecord
+from futures_bot.domain.broker import (
+    BrokerPublishStatus,
+    KafkaConsumedRecord,
+    KafkaPublishRecord,
+)
 from futures_bot.domain.events import EventEnvelope, EventType
 from futures_bot.domain.ids import BotId, BrokerTopicId, EventId, ProducerId, RunId
 from futures_bot.domain.journal import JournalRecord, WalOffset
@@ -87,6 +93,7 @@ def test_fail_next_does_not_store_batch() -> None:
     pub.publish_batch((_kafka_record(0),))
     assert pub.published_batches == []
     assert pub.published_records == []
+    assert pub.consumed_records() == ()
 
 
 def test_fail_next_resets_after_one_failure() -> None:
@@ -126,6 +133,45 @@ def test_failed_batch_not_included_in_published_batches() -> None:
     assert len(pub.published_batches) == 2
 
 
+# ── consumed_records ─────────────────────────────────────────────────────────
+
+def test_successful_publish_creates_consumed_records_with_assigned_offsets() -> None:
+    pub = InMemoryBrokerPublisher()
+    pub.publish_batch((_kafka_record(0), _kafka_record(1), _kafka_record(2)))
+    consumed = pub.consumed_records()
+    assert all(isinstance(record, KafkaConsumedRecord) for record in consumed)
+    assert [record.kafka_offset.offset for record in consumed] == [0, 1, 2]
+
+
+def test_consumed_records_offsets_continue_across_publishes() -> None:
+    pub = InMemoryBrokerPublisher()
+    pub.publish_batch((_kafka_record(0), _kafka_record(1)))
+    pub.publish_batch((_kafka_record(2), _kafka_record(3)))
+    assert [record.kafka_offset.offset for record in pub.consumed_records()] == [
+        0,
+        1,
+        2,
+        3,
+    ]
+
+
+def test_consumed_records_preserve_journal_record_topic_and_key() -> None:
+    pub = InMemoryBrokerPublisher()
+    record = _kafka_record(0)
+    pub.publish_batch((record,))
+    consumed = pub.consumed_records()
+    assert len(consumed) == 1
+    assert consumed[0].journal_record == record.journal_record
+    assert consumed[0].topic == record.topic
+    assert consumed[0].key == record.key
+
+
+def test_empty_batch_creates_no_consumed_records() -> None:
+    pub = InMemoryBrokerPublisher()
+    pub.publish_batch(())
+    assert pub.consumed_records() == ()
+
+
 # ── deterministic offset counter ─────────────────────────────────────────────
 
 def test_kafka_offset_starts_at_zero() -> None:
@@ -155,3 +201,22 @@ def test_failed_batch_does_not_advance_offset_counter() -> None:
     ack = pub.publish_batch((_kafka_record(2),))  # kafka offset 1 (not 2)
     assert ack.kafka_offset is not None
     assert ack.kafka_offset.offset == 1
+
+
+def test_in_memory_broker_does_not_import_db_writer_checkpoint_or_gc_logic() -> None:
+    source_path = inspect.getsourcefile(InMemoryBrokerPublisher)
+    assert source_path is not None
+    source = Path(source_path).read_text()
+    import_lines = [
+        line for line in source.splitlines()
+        if line.strip().startswith(("import ", "from "))
+    ]
+    forbidden = (
+        "db_writer",
+        "checkpoint",
+        "LocalJsonlWal",
+        "local_jsonl",
+        "decide_wal_gc",
+    )
+    for name in forbidden:
+        assert not any(name in line for line in import_lines), f"found {name!r} import"

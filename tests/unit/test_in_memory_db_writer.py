@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from futures_bot.domain.broker import KafkaPublishRecord
+from futures_bot.domain.broker import (
+    KafkaConsumedRecord,
+    KafkaPartitionOffset,
+    KafkaPublishRecord,
+)
 from futures_bot.domain.events import EventEnvelope, EventType
 from futures_bot.domain.ids import BotId, BrokerTopicId, EventId, ProducerId, RunId
 from futures_bot.domain.journal import JournalRecord, WalOffset
@@ -49,16 +53,50 @@ def _kafka_record(
     *,
     run_id: str = "run-1",
     event_id: str | None = None,
-) -> KafkaPublishRecord:
-    return KafkaPublishRecord(
+) -> KafkaConsumedRecord:
+    return KafkaConsumedRecord(
         journal_record=_journal_record(offset, run_id=run_id, event_id=event_id),
         topic=BrokerTopicId("events.topic"),
         key="bot-1",
+        kafka_offset=KafkaPartitionOffset(
+            topic=BrokerTopicId("events.topic"),
+            partition=0,
+            offset=offset,
+        ),
     )
 
 
-def _records(*offsets: int, run_id: str = "run-1") -> tuple[KafkaPublishRecord, ...]:
+def _records(*offsets: int, run_id: str = "run-1") -> tuple[KafkaConsumedRecord, ...]:
     return tuple(_kafka_record(offset, run_id=run_id) for offset in offsets)
+
+
+def _consumed_with_broker_offset(
+    wal_offset: int,
+    broker_offset: int,
+    *,
+    partition: int = 0,
+    topic: str = "events.topic",
+    event_id: str | None = None,
+) -> KafkaConsumedRecord:
+    topic_id = BrokerTopicId(topic)
+    return KafkaConsumedRecord(
+        journal_record=_journal_record(wal_offset, event_id=event_id),
+        topic=topic_id,
+        key="bot-1",
+        kafka_offset=KafkaPartitionOffset(
+            topic=topic_id,
+            partition=partition,
+            offset=broker_offset,
+        ),
+    )
+
+
+def _raw_publish_record(offset: int) -> KafkaPublishRecord:
+    return KafkaPublishRecord(
+        journal_record=_journal_record(offset),
+        topic=BrokerTopicId("events.topic"),
+        key="bot-1",
+    )
 
 
 def test_commit_contiguous_batch_stores_records() -> None:
@@ -114,6 +152,46 @@ def test_non_contiguous_offsets_raises_value_error() -> None:
         store.commit_records(_records(0, 2))
 
 
+def test_mixed_topic_raises_value_error() -> None:
+    store = InMemoryCommittedEventStore()
+    records = (
+        _consumed_with_broker_offset(0, 0, topic="events.topic"),
+        _consumed_with_broker_offset(1, 1, topic="other.topic"),
+    )
+    with pytest.raises(ValueError, match="same topic"):
+        store.commit_records(records)
+
+
+def test_mixed_broker_partition_raises_value_error() -> None:
+    store = InMemoryCommittedEventStore()
+    records = (
+        _consumed_with_broker_offset(0, 0, partition=0),
+        _consumed_with_broker_offset(1, 1, partition=1),
+    )
+    with pytest.raises(ValueError, match="same broker partition"):
+        store.commit_records(records)
+
+
+def test_unsorted_broker_offsets_raises_value_error() -> None:
+    store = InMemoryCommittedEventStore()
+    records = (
+        _consumed_with_broker_offset(0, 2),
+        _consumed_with_broker_offset(1, 1),
+    )
+    with pytest.raises(ValueError, match="sorted by broker offset"):
+        store.commit_records(records)
+
+
+def test_non_contiguous_broker_offsets_raises_value_error() -> None:
+    store = InMemoryCommittedEventStore()
+    records = (
+        _consumed_with_broker_offset(0, 0),
+        _consumed_with_broker_offset(1, 2),
+    )
+    with pytest.raises(ValueError, match="contiguous by broker offset"):
+        store.commit_records(records)
+
+
 def test_fail_next_commit_raises_and_stores_nothing() -> None:
     store = InMemoryCommittedEventStore(fail_next_commit=True)
     with pytest.raises(RuntimeError, match="simulated"):
@@ -134,6 +212,19 @@ def test_same_offset_different_event_id_raises_value_error() -> None:
     store.commit_records((_kafka_record(7, event_id="evt-a"),))
     with pytest.raises(ValueError, match="conflict"):
         store.commit_records((_kafka_record(7, event_id="evt-b"),))
+
+
+def test_same_offset_same_event_id_conflicting_broker_offset_raises_value_error() -> None:
+    store = InMemoryCommittedEventStore()
+    store.commit_records((_consumed_with_broker_offset(7, 20, event_id="evt-same"),))
+    with pytest.raises(ValueError, match="kafka_offset"):
+        store.commit_records((_consumed_with_broker_offset(7, 21, event_id="evt-same"),))
+
+
+def test_raw_publish_record_is_rejected() -> None:
+    store = InMemoryCommittedEventStore()
+    with pytest.raises(TypeError, match="KafkaConsumedRecord"):
+        store.commit_records((_raw_publish_record(0),))  # type: ignore[arg-type]
 
 
 def _source() -> str:

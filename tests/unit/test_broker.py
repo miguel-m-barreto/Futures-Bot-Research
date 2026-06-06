@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from futures_bot.domain.broker import (
     BrokerPublishStatus,
+    KafkaConsumedRecord,
     KafkaPartitionOffset,
     KafkaPublishAck,
     KafkaPublishRecord,
@@ -115,6 +116,53 @@ def test_kafka_publish_record_rejects_empty_header_name() -> None:
             key="bot-1",
             headers=(("", "value"),),
         )
+
+
+# ── KafkaConsumedRecord ───────────────────────────────────────────────────────
+
+def test_kafka_consumed_record_accepts_matching_topic() -> None:
+    consumed = KafkaConsumedRecord(
+        journal_record=_record(),
+        topic=_topic(),
+        key="bot-1",
+        kafka_offset=_kafka_offset(partition=3, offset=12),
+    )
+    assert consumed.kafka_offset.partition == 3
+    assert consumed.kafka_offset.offset == 12
+
+
+def test_kafka_consumed_record_rejects_mismatched_topic() -> None:
+    with pytest.raises(ValidationError, match=r"kafka_offset\.topic"):
+        KafkaConsumedRecord(
+            journal_record=_record(),
+            topic=BrokerTopicId("other.topic"),
+            key="bot-1",
+            kafka_offset=_kafka_offset(),
+        )
+
+
+def test_kafka_consumed_record_preserves_journal_record() -> None:
+    journal_record = _record()
+    consumed = KafkaConsumedRecord(
+        journal_record=journal_record,
+        topic=_topic(),
+        key=None,
+        kafka_offset=_kafka_offset(offset=99),
+    )
+    assert consumed.journal_record == journal_record
+    assert consumed.key is None
+
+
+def test_kafka_consumed_record_has_no_db_or_checkpoint_fields() -> None:
+    consumed = KafkaConsumedRecord(
+        journal_record=_record(),
+        topic=_topic(),
+        key="bot-1",
+        kafka_offset=_kafka_offset(),
+    )
+    assert not hasattr(consumed, "db_transaction_id")
+    assert not hasattr(consumed, "batch_id")
+    assert not hasattr(consumed, "last_committed_wal_offset")
 
 
 # ── KafkaPublishAck ────────────────────────────────────────────────────────────

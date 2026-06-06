@@ -11,7 +11,7 @@ from typing import Protocol
 
 from futures_bot.domain import broker as broker_domain
 from futures_bot.domain.ids import BatchId, ConsumerId, RunId, SidecarId
-from futures_bot.domain.journal import JournalRecord
+from futures_bot.domain.journal import JournalRecord, WalOffset
 from futures_bot.domain.sidecars import DbWriterCheckpoint, SidecarCheckpoint, SidecarKind
 from futures_bot.ports.checkpoint_store import (
     DbWriterCheckpointStorePort,
@@ -23,13 +23,19 @@ class CommittedEventStorePort(Protocol):
     """Minimal durable-event sink contract used by LocalDbWriterService."""
 
     def commit_records(
-        self, records: tuple[broker_domain.KafkaPublishRecord, ...]
+        self, records: tuple[broker_domain.KafkaConsumedRecord, ...]
     ) -> tuple[JournalRecord, ...]:
         """Durably commit records and return committed journal records."""
         ...
 
     def committed_records(self, run_id: RunId) -> tuple[JournalRecord, ...]:
         """Return committed records for run_id in WAL offset order."""
+        ...
+
+    def committed_kafka_offset(
+        self, run_id: RunId, wal_offset: WalOffset
+    ) -> broker_domain.KafkaPartitionOffset | None:
+        """Return the committed broker offset for run_id/wal_offset, if any."""
         ...
 
 
@@ -40,7 +46,7 @@ def _utcnow() -> datetime:
 class LocalDbWriterService:
     """One-shot local DB writer service.
 
-    Consumes already-published KafkaPublishRecord objects, commits their
+    Consumes broker-assigned KafkaConsumedRecord objects, commits their
     JournalRecord payloads into a local sink, then advances DB writer and
     required-consumer checkpoints only after the commit succeeds.
     """
@@ -62,10 +68,10 @@ class LocalDbWriterService:
         self._is_required_for_wal_gc = is_required_for_wal_gc
         self._now: Callable[[], datetime] = now if now is not None else _utcnow
 
-    def commit_published_batch(
-        self, records: tuple[broker_domain.KafkaPublishRecord, ...]
+    def commit_consumed_batch(
+        self, records: tuple[broker_domain.KafkaConsumedRecord, ...]
     ) -> DbWriterCheckpoint | None:
-        """Commit published records and advance checkpoints after success."""
+        """Commit consumed records and advance checkpoints after success."""
         self._validate_batch(records)
 
         run_id = records[0].journal_record.run_id
@@ -104,7 +110,7 @@ class LocalDbWriterService:
             run_id=run_id,
             last_committed_wal_offset=last_record.wal_offset,
             last_committed_event_id=last_record.event.event_id,
-            kafka_offset=self._checkpoint_kafka_offset(records_to_commit[-1]),
+            kafka_offset=records_to_commit[-1].kafka_offset,
             db_transaction_id=(
                 f"local-dbwriter:{self._consumer_id!s}:{run_id!s}:{last_offset}"
             ),
@@ -129,28 +135,36 @@ class LocalDbWriterService:
 
         return saved_checkpoint
 
+    def commit_published_batch(
+        self, _records: tuple[broker_domain.KafkaPublishRecord, ...]
+    ) -> DbWriterCheckpoint | None:
+        """Reject raw publish records: DBWriter requires broker-consumed input."""
+        raise TypeError(
+            "DBWriter requires KafkaConsumedRecord objects with broker-assigned "
+            "kafka_offset; KafkaPublishRecord is only the relay publish payload"
+        )
+
     @staticmethod
-    def _validate_batch(records: tuple[broker_domain.KafkaPublishRecord, ...]) -> None:
+    def _validate_batch(records: tuple[broker_domain.KafkaConsumedRecord, ...]) -> None:
         if not records:
             raise ValueError("records must be non-empty")
 
-        run_id = records[0].journal_record.run_id
-        offsets = [record.journal_record.wal_offset.value for record in records]
-
-        for record in records:
-            if record.journal_record.run_id != run_id:
-                raise ValueError("records must all have the same run_id")
-
-        if offsets != sorted(offsets):
-            raise ValueError("records must be sorted by wal_offset")
-
-        for previous, current in pairwise(offsets):
-            if current != previous + 1:
-                raise ValueError("records must be contiguous by wal_offset")
+        _validate_consumed_record_types(records)
+        _validate_batch_scope(records)
+        _validate_sorted_contiguous(
+            [record.journal_record.wal_offset.value for record in records],
+            sort_message="records must be sorted by wal_offset",
+            contiguous_message="records must be contiguous by wal_offset",
+        )
+        _validate_sorted_contiguous(
+            [record.kafka_offset.offset for record in records],
+            sort_message="records must be sorted by broker offset",
+            contiguous_message="records must be contiguous by broker offset",
+        )
 
     def _validate_checkpoint_duplicates(
         self,
-        records: tuple[broker_domain.KafkaPublishRecord, ...],
+        records: tuple[broker_domain.KafkaConsumedRecord, ...],
         checkpoint: DbWriterCheckpoint,
     ) -> None:
         committed_by_offset = {
@@ -176,13 +190,51 @@ class LocalDbWriterService:
                     f"existing event_id {committed.event.event_id!s}, "
                     f"new event_id {record.journal_record.event.event_id!s}"
                 )
+            committed_kafka_offset = self._db_store.committed_kafka_offset(
+                checkpoint.run_id, record.journal_record.wal_offset
+            )
+            if committed_kafka_offset != record.kafka_offset:
+                raise ValueError(
+                    f"record conflict at offset {wal_offset}: "
+                    f"existing kafka_offset {committed_kafka_offset!s}, "
+                    f"new kafka_offset {record.kafka_offset!s}"
+                )
 
-    @staticmethod
-    def _checkpoint_kafka_offset(
-        record: broker_domain.KafkaPublishRecord,
-    ) -> broker_domain.KafkaPartitionOffset:
-        return broker_domain.KafkaPartitionOffset(
-            topic=record.topic,
-            partition=0,
-            offset=record.journal_record.wal_offset.value,
-        )
+
+def _validate_consumed_record_types(
+    records: tuple[broker_domain.KafkaConsumedRecord, ...]
+) -> None:
+    for record in records:
+        if not isinstance(record, broker_domain.KafkaConsumedRecord):
+            raise TypeError(
+                "DBWriter requires KafkaConsumedRecord objects with "
+                "broker-assigned kafka_offset"
+            )
+
+
+def _validate_batch_scope(records: tuple[broker_domain.KafkaConsumedRecord, ...]) -> None:
+    run_id = records[0].journal_record.run_id
+    topic = records[0].topic
+    partition = records[0].kafka_offset.partition
+
+    for record in records:
+        if record.journal_record.run_id != run_id:
+            raise ValueError("records must all have the same run_id")
+        if record.topic != topic:
+            raise ValueError("records must all have the same topic")
+        if record.kafka_offset.partition != partition:
+            raise ValueError("records must all have the same broker partition")
+
+
+def _validate_sorted_contiguous(
+    values: list[int],
+    *,
+    sort_message: str,
+    contiguous_message: str,
+) -> None:
+    if values != sorted(values):
+        raise ValueError(sort_message)
+
+    for previous, current in pairwise(values):
+        if current != previous + 1:
+            raise ValueError(contiguous_message)

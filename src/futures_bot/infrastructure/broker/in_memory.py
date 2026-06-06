@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from futures_bot.domain.broker import (
     BrokerPublishStatus,
+    KafkaConsumedRecord,
     KafkaPartitionOffset,
     KafkaPublishAck,
     KafkaPublishRecord,
@@ -25,6 +26,7 @@ class InMemoryBrokerPublisher:
 
     def __init__(self, fail_next: bool = False) -> None:
         self._published_batches: list[tuple[KafkaPublishRecord, ...]] = []
+        self._consumed_batches: list[tuple[KafkaConsumedRecord, ...]] = []
         self._offset_counter: int = 0
         self.fail_next: bool = fail_next
 
@@ -54,11 +56,24 @@ class InMemoryBrokerPublisher:
                 reason="simulated broker unavailable",
             )
 
-        # Assign monotonically increasing Kafka partition offsets.
-        # First record in the batch gets offset = _offset_counter,
-        # last record gets offset = _offset_counter + len(records) - 1.
+        # Assign monotonically increasing Kafka partition offsets for this
+        # local fake broker partition. The consumed record is the broker-side
+        # contract DBWriter may consume.
         batch_start = self._offset_counter
         self._offset_counter += len(records)
+        consumed_records = tuple(
+            KafkaConsumedRecord(
+                journal_record=record.journal_record,
+                topic=record.topic,
+                key=record.key,
+                kafka_offset=KafkaPartitionOffset(
+                    topic=record.topic,
+                    partition=0,
+                    offset=batch_start + index,
+                ),
+            )
+            for index, record in enumerate(records)
+        )
         kafka_offset = KafkaPartitionOffset(
             topic=last.topic,
             partition=0,
@@ -66,6 +81,7 @@ class InMemoryBrokerPublisher:
         )
 
         self._published_batches.append(records)
+        self._consumed_batches.append(consumed_records)
 
         return KafkaPublishAck(
             status=BrokerPublishStatus.PUBLISHED,
@@ -85,3 +101,7 @@ class InMemoryBrokerPublisher:
     def published_records(self) -> list[KafkaPublishRecord]:
         """Flat list of all successfully published records in order."""
         return [rec for batch in self._published_batches for rec in batch]
+
+    def consumed_records(self) -> tuple[KafkaConsumedRecord, ...]:
+        """Flat tuple of broker-assigned records in publish order."""
+        return tuple(rec for batch in self._consumed_batches for rec in batch)

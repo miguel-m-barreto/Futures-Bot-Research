@@ -69,6 +69,32 @@ class KafkaPublishRecord(BaseModel):
         return value
 
 
+class KafkaConsumedRecord(BaseModel):
+    """Broker-assigned record suitable for downstream consumers."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    journal_record: JournalRecord
+    topic: BrokerTopicId
+    key: str | None = None
+    kafka_offset: KafkaPartitionOffset
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value or value != value.strip():
+            raise ValueError("key must be a non-empty trimmed string")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if self.kafka_offset.topic != self.topic:
+            raise ValueError("kafka_offset.topic must equal topic")
+        return self
+
+
 class KafkaPublishAck(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
