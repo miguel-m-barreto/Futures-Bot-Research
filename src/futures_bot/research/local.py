@@ -10,11 +10,16 @@ from datetime import UTC, datetime
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
     EvaluationArtifactMetadata,
+    EvaluationPlan,
+    ReplayDataSourceKind,
+    ReplayPlan,
     ResearchRunManifest,
     ResearchRunStatus,
 )
 from futures_bot.ports.research import (
     EvaluationArtifactStorePort,
+    EvaluationPlanStorePort,
+    ReplayPlanStorePort,
     ResearchRunManifestStorePort,
 )
 
@@ -107,3 +112,65 @@ def _append_reason(existing_notes: str | None, reason: str | None) -> str | None
     if existing_notes is None:
         return reason
     return f"{existing_notes}\n{reason}"
+
+
+class LocalResearchPlanner:
+    """Metadata-only local planner for replay and evaluation plans."""
+
+    def __init__(
+        self,
+        *,
+        replay_plan_store: ReplayPlanStorePort,
+        evaluation_plan_store: EvaluationPlanStorePort,
+        manifest_store: ResearchRunManifestStorePort | None = None,
+    ) -> None:
+        self._replay_plan_store = replay_plan_store
+        self._evaluation_plan_store = evaluation_plan_store
+        self._manifest_store = manifest_store
+
+    def create_replay_plan(self, plan: ReplayPlan) -> ReplayPlan:
+        """Validate and save replay plan metadata."""
+        self.validate_plan_against_manifest(plan)
+        self._replay_plan_store.save(plan)
+        return plan
+
+    def create_evaluation_plan(self, plan: EvaluationPlan) -> EvaluationPlan:
+        """Save evaluation plan metadata."""
+        self._evaluation_plan_store.save(plan)
+        return plan
+
+    def replay_plans_for_run(self, run_id: RunId) -> tuple[ReplayPlan, ...]:
+        """Return replay plans for run_id."""
+        return self._replay_plan_store.list_for_run(run_id)
+
+    def evaluation_plans_for_run(self, run_id: RunId) -> tuple[EvaluationPlan, ...]:
+        """Return evaluation plans for run_id."""
+        return self._evaluation_plan_store.list_for_run(run_id)
+
+    def validate_plan_against_manifest(self, replay_plan: ReplayPlan) -> None:
+        """Validate replay plan metadata against the run manifest, if available."""
+        if self._manifest_store is None:
+            return
+
+        manifest = self._manifest_store.load(replay_plan.run_id)
+        if manifest is None:
+            raise KeyError(
+                f"research run manifest not found: {replay_plan.run_id!s}"
+            )
+
+        if (
+            replay_plan.data_source_kind is ReplayDataSourceKind.DATASET_SNAPSHOT
+            and replay_plan.dataset_id != manifest.dataset.dataset_id
+        ):
+            raise ValueError(
+                "replay plan dataset_id must match manifest dataset_id"
+            )
+
+        for window in replay_plan.temporal_windows:
+            if (
+                window.start_at < manifest.dataset.start_at
+                or window.end_at > manifest.dataset.end_at
+            ):
+                raise ValueError(
+                    "replay plan temporal windows must be within manifest dataset range"
+                )

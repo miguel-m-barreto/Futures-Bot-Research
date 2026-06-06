@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Protocol
 
 from futures_bot.domain.ids import RunId
-from futures_bot.domain.research import EvaluationArtifactMetadata, ResearchRunManifest
+from futures_bot.domain.research import (
+    EvaluationArtifactMetadata,
+    EvaluationPlan,
+    ReplayPlan,
+    ResearchRunManifest,
+)
 
 
 class ResearchRunManifestStorePort(Protocol):
@@ -35,4 +40,36 @@ class EvaluationArtifactStorePort(Protocol):
 
     def list_for_run(self, run_id: RunId) -> tuple[EvaluationArtifactMetadata, ...]:
         """Return artifact metadata for run_id in deterministic order."""
+        ...
+
+
+class ReplayPlanStorePort(Protocol):
+    """Persistence abstraction for replay plan metadata."""
+
+    def save(self, plan: ReplayPlan) -> None:
+        """Persist replay plan metadata."""
+        ...
+
+    def load(self, replay_plan_id: str) -> ReplayPlan | None:
+        """Return replay plan by replay_plan_id, or None."""
+        ...
+
+    def list_for_run(self, run_id: RunId) -> tuple[ReplayPlan, ...]:
+        """Return replay plans for run_id in deterministic order."""
+        ...
+
+
+class EvaluationPlanStorePort(Protocol):
+    """Persistence abstraction for evaluation plan metadata."""
+
+    def save(self, plan: EvaluationPlan) -> None:
+        """Persist evaluation plan metadata."""
+        ...
+
+    def load(self, evaluation_plan_id: str) -> EvaluationPlan | None:
+        """Return evaluation plan by evaluation_plan_id, or None."""
+        ...
+
+    def list_for_run(self, run_id: RunId) -> tuple[EvaluationPlan, ...]:
+        """Return evaluation plans for run_id in deterministic order."""
         ...

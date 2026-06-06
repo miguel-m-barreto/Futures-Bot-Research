@@ -7,6 +7,8 @@ from __future__ import annotations
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
     EvaluationArtifactMetadata,
+    EvaluationPlan,
+    ReplayPlan,
     ResearchRunManifest,
     ResearchRunStatus,
 )
@@ -103,5 +105,75 @@ class InMemoryEvaluationArtifactStore:
                     if artifact.run_id == run_id
                 ),
                 key=lambda artifact: (artifact.created_at, artifact.artifact_id),
+            )
+        )
+
+
+class InMemoryReplayPlanStore:
+    """In-memory ReplayPlanStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._plans: dict[str, ReplayPlan] = {}
+
+    def save(self, plan: ReplayPlan) -> None:
+        """Save replay plan metadata, rejecting conflicting plan IDs."""
+        existing = self._plans.get(plan.replay_plan_id)
+        if existing is not None:
+            if existing != plan:
+                raise ValueError(
+                    f"replay_plan_id conflict for {plan.replay_plan_id!r}"
+                )
+            return
+        self._plans[plan.replay_plan_id] = plan
+
+    def load(self, replay_plan_id: str) -> ReplayPlan | None:
+        """Return replay plan by replay_plan_id, or None."""
+        return self._plans.get(replay_plan_id)
+
+    def list_for_run(self, run_id: RunId) -> tuple[ReplayPlan, ...]:
+        """Return replay plans for run_id sorted by created_at then id."""
+        return tuple(
+            sorted(
+                (
+                    plan
+                    for plan in self._plans.values()
+                    if plan.run_id == run_id
+                ),
+                key=lambda plan: (plan.created_at, plan.replay_plan_id),
+            )
+        )
+
+
+class InMemoryEvaluationPlanStore:
+    """In-memory EvaluationPlanStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._plans: dict[str, EvaluationPlan] = {}
+
+    def save(self, plan: EvaluationPlan) -> None:
+        """Save evaluation plan metadata, rejecting conflicting plan IDs."""
+        existing = self._plans.get(plan.evaluation_plan_id)
+        if existing is not None:
+            if existing != plan:
+                raise ValueError(
+                    f"evaluation_plan_id conflict for {plan.evaluation_plan_id!r}"
+                )
+            return
+        self._plans[plan.evaluation_plan_id] = plan
+
+    def load(self, evaluation_plan_id: str) -> EvaluationPlan | None:
+        """Return evaluation plan by evaluation_plan_id, or None."""
+        return self._plans.get(evaluation_plan_id)
+
+    def list_for_run(self, run_id: RunId) -> tuple[EvaluationPlan, ...]:
+        """Return evaluation plans for run_id sorted by created_at then id."""
+        return tuple(
+            sorted(
+                (
+                    plan
+                    for plan in self._plans.values()
+                    if plan.run_id == run_id
+                ),
+                key=lambda plan: (plan.created_at, plan.evaluation_plan_id),
             )
         )

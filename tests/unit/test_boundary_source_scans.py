@@ -88,6 +88,9 @@ def test_research_domain_does_not_import_forbidden_dependencies() -> None:
         "LocalJsonlWal",
         "sidecars.local",
         "decide_wal_gc",
+        "matplotlib",
+        "plotly",
+        "seaborn",
     )
     for name in forbidden:
         assert name not in source
@@ -116,6 +119,9 @@ def test_in_memory_research_store_does_not_import_forbidden_dependencies() -> No
         "torch",
         "LocalJsonlWal",
         "decide_wal_gc",
+        "matplotlib",
+        "plotly",
+        "seaborn",
     )
     for name in forbidden:
         assert name not in source
