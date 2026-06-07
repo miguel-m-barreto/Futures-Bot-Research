@@ -6,13 +6,18 @@ from __future__ import annotations
 
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
+    ConfigSnapshot,
+    ConfigSnapshotKind,
     EvaluationArtifactMetadata,
     EvaluationPlan,
     EvaluationResultSet,
     EvaluationResultStatus,
+    ExperimentDefinition,
+    ExperimentStatus,
     ReplayPlan,
     ResearchRunManifest,
     ResearchRunStatus,
+    RunLineageRecord,
 )
 
 _TERMINAL_STATUSES = frozenset(
@@ -28,6 +33,15 @@ _NON_TERMINAL_STATUSES = frozenset(
         ResearchRunStatus.RUNNING,
     }
 )
+
+
+_EXPERIMENT_FINAL_STATUSES = frozenset(
+    {
+        ExperimentStatus.ARCHIVED,
+        ExperimentStatus.INVALIDATED,
+    }
+)
+
 
 class InMemoryResearchRunManifestStore:
     """In-memory ResearchRunManifestStorePort implementation."""
@@ -70,6 +84,46 @@ class InMemoryResearchRunManifestStore:
         )
 
 
+class InMemoryExperimentDefinitionStore:
+    """In-memory ExperimentDefinitionStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._experiments: dict[str, ExperimentDefinition] = {}
+
+    def save(self, experiment: ExperimentDefinition) -> None:
+        """Save experiment metadata with timestamp and terminal status rules."""
+        existing = self._experiments.get(experiment.experiment_id)
+        if existing is not None:
+            if experiment.parent_experiment_id != existing.parent_experiment_id:
+                raise ValueError("experiment_id conflict: parent_experiment_id mismatch")
+            if experiment.updated_at < existing.updated_at:
+                raise ValueError(
+                    "experiment updated_at regression: "
+                    f"existing {existing.updated_at.isoformat()}, "
+                    f"new {experiment.updated_at.isoformat()}"
+                )
+            _validate_experiment_status_transition(existing.status, experiment.status)
+            if existing.status in _EXPERIMENT_FINAL_STATUSES and experiment != existing:
+                raise ValueError("archived or invalidated experiments are immutable")
+        self._experiments[experiment.experiment_id] = experiment
+
+    def load(self, experiment_id: str) -> ExperimentDefinition | None:
+        """Return experiment by experiment_id, or None."""
+        return self._experiments.get(experiment_id)
+
+    def list_all(self) -> tuple[ExperimentDefinition, ...]:
+        """Return experiments sorted by created_at then experiment_id."""
+        return tuple(
+            sorted(
+                self._experiments.values(),
+                key=lambda experiment: (
+                    experiment.created_at,
+                    experiment.experiment_id,
+                ),
+            )
+        )
+
+
 class InMemoryEvaluationArtifactStore:
     """In-memory EvaluationArtifactStorePort implementation."""
 
@@ -106,6 +160,53 @@ class InMemoryEvaluationArtifactStore:
                     if artifact.run_id == run_id
                 ),
                 key=lambda artifact: (artifact.created_at, artifact.artifact_id),
+            )
+        )
+
+
+class InMemoryConfigSnapshotStore:
+    """In-memory ConfigSnapshotStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._snapshots: dict[str, ConfigSnapshot] = {}
+
+    def save(self, snapshot: ConfigSnapshot) -> None:
+        """Save config snapshot metadata, rejecting conflicting config IDs."""
+        snapshot = ConfigSnapshot.model_validate(snapshot.model_dump())
+        existing = self._snapshots.get(snapshot.config_id)
+        if existing is not None:
+            if (
+                existing.kind != snapshot.kind
+                or existing.canonical_json != snapshot.canonical_json
+                or existing.sha256 != snapshot.sha256
+            ):
+                raise ValueError(f"config_id conflict for {snapshot.config_id!r}")
+            return
+        self._snapshots[snapshot.config_id] = snapshot
+
+    def load(self, config_id: str) -> ConfigSnapshot | None:
+        """Return config snapshot by config_id, or None."""
+        return self._snapshots.get(config_id)
+
+    def list_by_kind(self, kind: ConfigSnapshotKind) -> tuple[ConfigSnapshot, ...]:
+        """Return config snapshots by kind sorted by created_at then config_id."""
+        return tuple(
+            sorted(
+                (
+                    snapshot
+                    for snapshot in self._snapshots.values()
+                    if snapshot.kind is kind
+                ),
+                key=lambda snapshot: (snapshot.created_at, snapshot.config_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ConfigSnapshot, ...]:
+        """Return config snapshots sorted by created_at then config_id."""
+        return tuple(
+            sorted(
+                self._snapshots.values(),
+                key=lambda snapshot: (snapshot.created_at, snapshot.config_id),
             )
         )
 
@@ -176,6 +277,54 @@ class InMemoryEvaluationPlanStore:
                     if plan.run_id == run_id
                 ),
                 key=lambda plan: (plan.created_at, plan.evaluation_plan_id),
+            )
+        )
+
+
+class InMemoryRunLineageStore:
+    """In-memory RunLineageStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, RunLineageRecord] = {}
+
+    def save(self, record: RunLineageRecord) -> None:
+        """Save lineage metadata, rejecting conflicting lineage IDs."""
+        existing = self._records.get(record.lineage_id)
+        if existing is not None:
+            if existing != record:
+                raise ValueError(f"lineage_id conflict for {record.lineage_id!r}")
+            return
+        self._records[record.lineage_id] = record
+
+    def load(self, lineage_id: str) -> RunLineageRecord | None:
+        """Return lineage record by lineage_id, or None."""
+        return self._records.get(lineage_id)
+
+    def list_for_run(self, run_id: RunId) -> tuple[RunLineageRecord, ...]:
+        """Return lineage records for run_id sorted by created_at then lineage_id."""
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in self._records.values()
+                    if record.run_id == run_id
+                ),
+                key=lambda record: (record.created_at, record.lineage_id),
+            )
+        )
+
+    def list_for_experiment(
+        self, experiment_id: str
+    ) -> tuple[RunLineageRecord, ...]:
+        """Return lineage records for experiment_id sorted by created_at then id."""
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in self._records.values()
+                    if record.experiment_id == experiment_id
+                ),
+                key=lambda record: (record.created_at, record.lineage_id),
             )
         )
 
@@ -263,6 +412,25 @@ def _validate_result_status_transition(
     if target is EvaluationResultStatus.DRAFT:
         raise ValueError(
             f"invalid evaluation result status transition: {current} -> {target}"
+        )
+
+
+def _validate_experiment_status_transition(
+    current: ExperimentStatus,
+    target: ExperimentStatus,
+) -> None:
+    if current is target:
+        return
+    if current in _EXPERIMENT_FINAL_STATUSES:
+        raise ValueError(
+            f"invalid experiment status transition: {current} -> {target}"
+        )
+    if current is ExperimentStatus.COMPLETED and target not in {
+        ExperimentStatus.ARCHIVED,
+        ExperimentStatus.INVALIDATED,
+    }:
+        raise ValueError(
+            f"invalid experiment status transition: {current} -> {target}"
         )
 
 

@@ -4,11 +4,15 @@ from typing import Protocol
 
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
+    ConfigSnapshot,
+    ConfigSnapshotKind,
     EvaluationArtifactMetadata,
     EvaluationPlan,
     EvaluationResultSet,
+    ExperimentDefinition,
     ReplayPlan,
     ResearchRunManifest,
+    RunLineageRecord,
 )
 
 
@@ -95,4 +99,62 @@ class EvaluationResultStorePort(Protocol):
         self, evaluation_plan_id: str
     ) -> tuple[EvaluationResultSet, ...]:
         """Return result sets for evaluation_plan_id in deterministic order."""
+        ...
+
+
+class ExperimentDefinitionStorePort(Protocol):
+    """Persistence abstraction for experiment definitions."""
+
+    def save(self, experiment: ExperimentDefinition) -> None:
+        """Persist experiment metadata."""
+        ...
+
+    def load(self, experiment_id: str) -> ExperimentDefinition | None:
+        """Return experiment by experiment_id, or None."""
+        ...
+
+    def list_all(self) -> tuple[ExperimentDefinition, ...]:
+        """Return experiments in deterministic order."""
+        ...
+
+
+class ConfigSnapshotStorePort(Protocol):
+    """Persistence abstraction for canonical config snapshots."""
+
+    def save(self, snapshot: ConfigSnapshot) -> None:
+        """Persist config snapshot metadata."""
+        ...
+
+    def load(self, config_id: str) -> ConfigSnapshot | None:
+        """Return config snapshot by config_id, or None."""
+        ...
+
+    def list_by_kind(self, kind: ConfigSnapshotKind) -> tuple[ConfigSnapshot, ...]:
+        """Return config snapshots by kind in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ConfigSnapshot, ...]:
+        """Return config snapshots in deterministic order."""
+        ...
+
+
+class RunLineageStorePort(Protocol):
+    """Persistence abstraction for run lineage records."""
+
+    def save(self, record: RunLineageRecord) -> None:
+        """Persist lineage metadata."""
+        ...
+
+    def load(self, lineage_id: str) -> RunLineageRecord | None:
+        """Return lineage record by lineage_id, or None."""
+        ...
+
+    def list_for_run(self, run_id: RunId) -> tuple[RunLineageRecord, ...]:
+        """Return lineage records for run_id in deterministic order."""
+        ...
+
+    def list_for_experiment(
+        self, experiment_id: str
+    ) -> tuple[RunLineageRecord, ...]:
+        """Return lineage records for experiment_id in deterministic order."""
         ...

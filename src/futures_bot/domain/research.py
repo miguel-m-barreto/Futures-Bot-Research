@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -17,6 +19,38 @@ class ResearchRunStatus(StrEnum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     INVALIDATED = "INVALIDATED"
+
+
+class ExperimentStatus(StrEnum):
+    PLANNED = "PLANNED"
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
+    ARCHIVED = "ARCHIVED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ConfigSnapshotKind(StrEnum):
+    RUN_CONFIG = "RUN_CONFIG"
+    DATASET_CONFIG = "DATASET_CONFIG"
+    FEATURE_CONFIG = "FEATURE_CONFIG"
+    LABEL_CONFIG = "LABEL_CONFIG"
+    BOT_CONFIG = "BOT_CONFIG"
+    DECISION_STACK_CONFIG = "DECISION_STACK_CONFIG"
+    RISK_CONFIG = "RISK_CONFIG"
+    EXECUTION_CONFIG = "EXECUTION_CONFIG"
+    EVALUATION_CONFIG = "EVALUATION_CONFIG"
+    ENVIRONMENT_CONFIG = "ENVIRONMENT_CONFIG"
+    OTHER = "OTHER"
+
+
+class RunLineageKind(StrEnum):
+    ROOT = "ROOT"
+    WALK_FORWARD_FOLD = "WALK_FORWARD_FOLD"
+    PARAMETER_SWEEP = "PARAMETER_SWEEP"
+    ABLATION = "ABLATION"
+    REPLAY_RERUN = "REPLAY_RERUN"
+    FAILURE_REPRODUCTION = "FAILURE_REPRODUCTION"
+    OTHER = "OTHER"
 
 
 class TemporalWindowKind(StrEnum):
@@ -102,6 +136,155 @@ class ObservationScope(StrEnum):
     BOT = "BOT"
     DECISION_STACK = "DECISION_STACK"
     OTHER = "OTHER"
+
+
+class ExperimentDefinition(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    experiment_id: str
+    title: str
+    objective: str
+    status: ExperimentStatus
+    created_at: datetime
+    updated_at: datetime
+    owner: str | None = None
+    tags: tuple[str, ...] = ()
+    parent_experiment_id: str | None = None
+    notes: str | None = None
+
+    @field_validator("experiment_id", "title", "objective")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def _validate_datetime(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("owner", "parent_experiment_id", "notes")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "text")
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for tag in value:
+            _validate_required_text(tag, "tag")
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate tags are not allowed")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_updated_at(self) -> Self:
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must be >= created_at")
+        return self
+
+
+class ConfigSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    config_id: str
+    kind: ConfigSnapshotKind
+    created_at: datetime
+    canonical_json: str
+    sha256: str
+    description: str | None = None
+
+    @field_validator("config_id", "canonical_json")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        if (
+            len(value) != 64
+            or value != value.lower()
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise ValueError("sha256 must be 64 lowercase hex characters")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "description")
+
+    @field_validator("canonical_json")
+    @classmethod
+    def _validate_canonical_json_object(cls, value: str) -> str:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("canonical_json must be valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("canonical_json must parse as a JSON object")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_sha_matches_canonical_json(self) -> Self:
+        expected = hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+        if self.sha256 != expected:
+            raise ValueError("sha256 must match canonical_json UTF-8 SHA-256 digest")
+        return self
+
+
+class RunLineageRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    lineage_id: str
+    run_id: RunId
+    experiment_id: str
+    kind: RunLineageKind
+    created_at: datetime
+    config_ids: tuple[str, ...]
+    parent_run_id: RunId | None = None
+    replay_plan_id: str | None = None
+    evaluation_plan_id: str | None = None
+    notes: str | None = None
+
+    @field_validator("lineage_id", "experiment_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("config_ids")
+    @classmethod
+    def _validate_config_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("config_ids must be non-empty")
+        for config_id in value:
+            _validate_required_text(config_id, "config_id")
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate config_ids are not allowed")
+        return value
+
+    @field_validator("replay_plan_id", "evaluation_plan_id", "notes")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "text")
+
+    @model_validator(mode="after")
+    def _validate_lineage(self) -> Self:
+        if self.parent_run_id == self.run_id:
+            raise ValueError("parent_run_id must not equal run_id")
+        if self.kind is RunLineageKind.ROOT and self.parent_run_id is not None:
+            raise ValueError("ROOT lineage records must not have parent_run_id")
+        return self
 
 
 class TemporalWindow(BaseModel):

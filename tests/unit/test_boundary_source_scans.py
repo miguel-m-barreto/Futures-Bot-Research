@@ -91,6 +91,8 @@ def test_research_domain_does_not_import_forbidden_dependencies() -> None:
         "matplotlib",
         "plotly",
         "seaborn",
+        "open(",
+        "write_text",
     )
     for name in forbidden:
         assert name not in source
@@ -154,3 +156,39 @@ def test_local_research_recorder_does_not_import_forbidden_dependencies() -> Non
     )
     for name in forbidden:
         assert name not in source
+
+
+def test_research_registry_and_fingerprint_do_not_import_forbidden_dependencies() -> None:
+    paths = (
+        ROOT / "src/futures_bot/research/config_fingerprint.py",
+        ROOT / "src/futures_bot/research/registry.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "open(",
+        "write_text",
+    )
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source
