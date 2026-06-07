@@ -8,6 +8,8 @@ from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
     EvaluationArtifactMetadata,
     EvaluationPlan,
+    EvaluationResultSet,
+    EvaluationResultStatus,
     ReplayPlan,
     ResearchRunManifest,
     ResearchRunStatus,
@@ -26,7 +28,6 @@ _NON_TERMINAL_STATUSES = frozenset(
         ResearchRunStatus.RUNNING,
     }
 )
-
 
 class InMemoryResearchRunManifestStore:
     """In-memory ResearchRunManifestStorePort implementation."""
@@ -177,3 +178,133 @@ class InMemoryEvaluationPlanStore:
                 key=lambda plan: (plan.created_at, plan.evaluation_plan_id),
             )
         )
+
+
+class InMemoryEvaluationResultStore:
+    """In-memory EvaluationResultStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._result_sets: dict[str, EvaluationResultSet] = {}
+
+    def save(self, result_set: EvaluationResultSet) -> None:
+        """Save result set metadata with timestamp and terminal status rules."""
+        result_set = EvaluationResultSet.model_validate(result_set.model_dump())
+        existing = self._result_sets.get(result_set.result_set_id)
+        if existing is not None:
+            if result_set.run_id != existing.run_id:
+                raise ValueError("result_set_id conflict: run_id mismatch")
+            if result_set.evaluation_plan_id != existing.evaluation_plan_id:
+                raise ValueError("result_set_id conflict: evaluation_plan_id mismatch")
+            if result_set.updated_at < existing.updated_at:
+                raise ValueError(
+                    "result set updated_at regression: "
+                    f"existing {existing.updated_at.isoformat()}, "
+                    f"new {result_set.updated_at.isoformat()}"
+                )
+            _validate_result_status_transition(existing.status, result_set.status)
+            _validate_terminal_content_immutability(existing, result_set)
+        self._result_sets[result_set.result_set_id] = result_set
+
+    def load(self, result_set_id: str) -> EvaluationResultSet | None:
+        """Return result set by result_set_id, or None."""
+        return self._result_sets.get(result_set_id)
+
+    def list_for_run(self, run_id: RunId) -> tuple[EvaluationResultSet, ...]:
+        """Return result sets for run_id sorted by created_at then id."""
+        return tuple(
+            sorted(
+                (
+                    result_set
+                    for result_set in self._result_sets.values()
+                    if result_set.run_id == run_id
+                ),
+                key=lambda result_set: (result_set.created_at, result_set.result_set_id),
+            )
+        )
+
+    def list_for_evaluation_plan(
+        self, evaluation_plan_id: str
+    ) -> tuple[EvaluationResultSet, ...]:
+        """Return result sets for evaluation_plan_id sorted by created_at then id."""
+        return tuple(
+            sorted(
+                (
+                    result_set
+                    for result_set in self._result_sets.values()
+                    if result_set.evaluation_plan_id == evaluation_plan_id
+                ),
+                key=lambda result_set: (result_set.created_at, result_set.result_set_id),
+            )
+        )
+
+
+def _validate_result_status_transition(
+    current: EvaluationResultStatus,
+    target: EvaluationResultStatus,
+) -> None:
+    if current is target:
+        return
+    if current is EvaluationResultStatus.INVALIDATED:
+        raise ValueError(
+            f"invalid evaluation result status transition: {current} -> {target}"
+        )
+    if current is EvaluationResultStatus.REVIEWED:
+        if target is EvaluationResultStatus.INVALIDATED:
+            return
+        raise ValueError(
+            f"invalid evaluation result status transition: {current} -> {target}"
+        )
+    if target is EvaluationResultStatus.REVIEWED:
+        if current is EvaluationResultStatus.RECORDED:
+            return
+        raise ValueError(
+            "evaluation result sets must be RECORDED before they can be REVIEWED"
+        )
+    if target is EvaluationResultStatus.DRAFT:
+        raise ValueError(
+            f"invalid evaluation result status transition: {current} -> {target}"
+        )
+
+
+def _validate_terminal_content_immutability(
+    existing: EvaluationResultSet,
+    candidate: EvaluationResultSet,
+) -> None:
+    if existing.status is EvaluationResultStatus.INVALIDATED:
+        if candidate != existing:
+            raise ValueError("invalidated evaluation result sets are immutable")
+        return
+
+    if existing.status is not EvaluationResultStatus.REVIEWED:
+        return
+
+    if candidate.status is EvaluationResultStatus.REVIEWED:
+        if candidate != existing:
+            raise ValueError("reviewed evaluation result sets are immutable")
+        return
+
+    if (
+        candidate.status is EvaluationResultStatus.INVALIDATED
+        and not _same_result_payload_except_status_notes_and_updated_at(
+            existing, candidate
+        )
+    ):
+        raise ValueError(
+            "reviewed evaluation result sets can only be invalidated "
+            "without changing observations, assessments, or artifacts"
+        )
+
+
+def _same_result_payload_except_status_notes_and_updated_at(
+    left: EvaluationResultSet,
+    right: EvaluationResultSet,
+) -> bool:
+    return (
+        left.result_set_id == right.result_set_id
+        and left.run_id == right.run_id
+        and left.evaluation_plan_id == right.evaluation_plan_id
+        and left.created_at == right.created_at
+        and left.observations == right.observations
+        and left.assessments == right.assessments
+        and left.artifact_ids == right.artifact_ids
+    )

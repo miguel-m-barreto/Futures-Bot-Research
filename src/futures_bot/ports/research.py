@@ -6,6 +6,7 @@ from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
     EvaluationArtifactMetadata,
     EvaluationPlan,
+    EvaluationResultSet,
     ReplayPlan,
     ResearchRunManifest,
 )
@@ -72,4 +73,26 @@ class EvaluationPlanStorePort(Protocol):
 
     def list_for_run(self, run_id: RunId) -> tuple[EvaluationPlan, ...]:
         """Return evaluation plans for run_id in deterministic order."""
+        ...
+
+
+class EvaluationResultStorePort(Protocol):
+    """Persistence abstraction for evaluation result set metadata."""
+
+    def save(self, result_set: EvaluationResultSet) -> None:
+        """Persist evaluation result set metadata."""
+        ...
+
+    def load(self, result_set_id: str) -> EvaluationResultSet | None:
+        """Return result set by result_set_id, or None."""
+        ...
+
+    def list_for_run(self, run_id: RunId) -> tuple[EvaluationResultSet, ...]:
+        """Return result sets for run_id in deterministic order."""
+        ...
+
+    def list_for_evaluation_plan(
+        self, evaluation_plan_id: str
+    ) -> tuple[EvaluationResultSet, ...]:
+        """Return result sets for evaluation_plan_id in deterministic order."""
         ...

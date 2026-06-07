@@ -77,6 +77,33 @@ class MetricDirection(StrEnum):
     INFORMATION_ONLY = "INFORMATION_ONLY"
 
 
+class EvaluationResultStatus(StrEnum):
+    DRAFT = "DRAFT"
+    RECORDED = "RECORDED"
+    REVIEWED = "REVIEWED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ExpectedOutcomeAssessmentStatus(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    PARTIAL = "PARTIAL"
+    REJECTED = "REJECTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    BUG_OR_INVALID = "BUG_OR_INVALID"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class ObservationScope(StrEnum):
+    FULL_RUN = "FULL_RUN"
+    TEMPORAL_WINDOW = "TEMPORAL_WINDOW"
+    FOLD = "FOLD"
+    COST_SCENARIO = "COST_SCENARIO"
+    REGIME = "REGIME"
+    BOT = "BOT"
+    DECISION_STACK = "DECISION_STACK"
+    OTHER = "OTHER"
+
+
 class TemporalWindow(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -464,6 +491,166 @@ class EvaluationPlan(BaseModel):
     @classmethod
     def _validate_notes(cls, value: str | None) -> str | None:
         return _validate_optional_text(value, "notes")
+
+
+class MetricObservation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    observation_id: str
+    run_id: RunId
+    evaluation_plan_id: str
+    metric_id: str
+    observed_at: datetime
+    value: Decimal
+    unit: str | None = None
+    scope: ObservationScope = ObservationScope.FULL_RUN
+    cost_scenario_id: str | None = None
+    temporal_window_id: str | None = None
+    fold_id: str | None = None
+    subject_id: str | None = None
+    notes: str | None = None
+
+    @field_validator("observation_id", "evaluation_plan_id", "metric_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("observed_at")
+    @classmethod
+    def _validate_observed_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_float_value(cls, value: object) -> object:
+        if isinstance(value, float):
+            raise ValueError("observation value must be Decimal-compatible, not float")
+        return value
+
+    @field_validator(
+        "unit",
+        "cost_scenario_id",
+        "temporal_window_id",
+        "fold_id",
+        "subject_id",
+        "notes",
+    )
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "text")
+
+
+class ExpectedOutcomeAssessment(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    assessment_id: str
+    run_id: RunId
+    evaluation_plan_id: str
+    setup_id: str
+    status: ExpectedOutcomeAssessmentStatus
+    assessed_at: datetime
+    rationale: str
+    related_observation_ids: tuple[str, ...] = ()
+
+    @field_validator("assessment_id", "evaluation_plan_id", "setup_id", "rationale")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("assessed_at")
+    @classmethod
+    def _validate_assessed_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("related_observation_ids")
+    @classmethod
+    def _validate_related_observation_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for observation_id in value:
+            _validate_required_text(observation_id, "related_observation_id")
+        return value
+
+
+class EvaluationResultSet(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    result_set_id: str
+    run_id: RunId
+    evaluation_plan_id: str
+    status: EvaluationResultStatus
+    created_at: datetime
+    updated_at: datetime
+    observations: tuple[MetricObservation, ...] = ()
+    assessments: tuple[ExpectedOutcomeAssessment, ...] = ()
+    artifact_ids: tuple[str, ...] = ()
+    notes: str | None = None
+
+    @field_validator("result_set_id", "evaluation_plan_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def _validate_datetime(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("artifact_ids")
+    @classmethod
+    def _validate_artifact_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for artifact_id in value:
+            _validate_required_text(artifact_id, "artifact_id")
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_result_set(self) -> Self:
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must be >= created_at")
+        _validate_observations_for_result_set(
+            self.observations, self.run_id, self.evaluation_plan_id
+        )
+        _validate_assessments_for_result_set(
+            self.assessments, self.run_id, self.evaluation_plan_id
+        )
+        return self
+
+
+def _validate_observations_for_result_set(
+    observations: tuple[MetricObservation, ...],
+    run_id: RunId,
+    evaluation_plan_id: str,
+) -> None:
+    observation_ids = [observation.observation_id for observation in observations]
+    if len(set(observation_ids)) != len(observation_ids):
+        raise ValueError("duplicate observation_id values are not allowed")
+    for observation in observations:
+        if observation.run_id != run_id:
+            raise ValueError("observation run_id must match result set run_id")
+        if observation.evaluation_plan_id != evaluation_plan_id:
+            raise ValueError(
+                "observation evaluation_plan_id must match result set evaluation_plan_id"
+            )
+
+
+def _validate_assessments_for_result_set(
+    assessments: tuple[ExpectedOutcomeAssessment, ...],
+    run_id: RunId,
+    evaluation_plan_id: str,
+) -> None:
+    assessment_ids = [assessment.assessment_id for assessment in assessments]
+    if len(set(assessment_ids)) != len(assessment_ids):
+        raise ValueError("duplicate assessment_id values are not allowed")
+    for assessment in assessments:
+        if assessment.run_id != run_id:
+            raise ValueError("assessment run_id must match result set run_id")
+        if assessment.evaluation_plan_id != evaluation_plan_id:
+            raise ValueError(
+                "assessment evaluation_plan_id must match result set evaluation_plan_id"
+            )
 
 
 def _validate_non_negative_bps(value: Decimal | None) -> Decimal | None:
