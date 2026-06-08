@@ -6,12 +6,14 @@ from datetime import UTC, datetime
 
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
+    ConfigBundle,
     ConfigSnapshot,
     ConfigSnapshotKind,
     ExperimentDefinition,
     RunLineageRecord,
 )
 from futures_bot.ports.research import (
+    ConfigBundleStorePort,
     ConfigSnapshotStorePort,
     EvaluationPlanStorePort,
     ExperimentDefinitionStorePort,
@@ -35,6 +37,7 @@ class LocalExperimentRegistry:
         experiment_store: ExperimentDefinitionStorePort,
         config_store: ConfigSnapshotStorePort,
         lineage_store: RunLineageStorePort,
+        config_bundle_store: ConfigBundleStorePort | None = None,
         fingerprinter: CanonicalConfigFingerprinter | None = None,
         manifest_store: ResearchRunManifestStorePort | None = None,
         replay_plan_store: ReplayPlanStorePort | None = None,
@@ -44,6 +47,7 @@ class LocalExperimentRegistry:
         self._experiment_store = experiment_store
         self._config_store = config_store
         self._lineage_store = lineage_store
+        self._config_bundle_store = config_bundle_store
         self._fingerprinter = (
             fingerprinter if fingerprinter is not None else CanonicalConfigFingerprinter()
         )
@@ -64,6 +68,11 @@ class LocalExperimentRegistry:
         self._config_store.save(snapshot)
         return snapshot
 
+    def register_config_bundle(self, bundle: ConfigBundle) -> ConfigBundle:
+        """Save composed config bundle metadata."""
+        self._require_config_bundle_store().save(bundle)
+        return bundle
+
     def fingerprint_config(
         self,
         *,
@@ -82,6 +91,38 @@ class LocalExperimentRegistry:
         )
         self._config_store.save(snapshot)
         return snapshot
+
+    def compose_config_bundle(
+        self,
+        *,
+        bundle_id: str,
+        config_ids: tuple[str, ...],
+        description: str | None = None,
+    ) -> ConfigBundle:
+        """Compose and save a deterministic bundle from stored config snapshots."""
+        bundle_store = self._require_config_bundle_store()
+        if not config_ids:
+            raise ValueError("config_ids must be non-empty")
+        if len(set(config_ids)) != len(config_ids):
+            raise ValueError("duplicate config_id values are not allowed")
+        snapshots: list[ConfigSnapshot] = []
+        for config_id in config_ids:
+            snapshot = self._config_store.load(config_id)
+            if snapshot is None:
+                raise KeyError(f"config snapshot not found: {config_id}")
+            snapshots.append(snapshot)
+        bundle = self._fingerprinter.bundle(
+            bundle_id=bundle_id,
+            snapshots=tuple(snapshots),
+            created_at=self._now(),
+            description=description,
+        )
+        bundle_store.save(bundle)
+        return bundle
+
+    def load_config_bundle(self, bundle_id: str) -> ConfigBundle | None:
+        """Return stored config bundle metadata by bundle_id."""
+        return self._require_config_bundle_store().load(bundle_id)
 
     def register_lineage(self, record: RunLineageRecord) -> RunLineageRecord:
         """Validate references and save run lineage metadata."""
@@ -120,6 +161,12 @@ class LocalExperimentRegistry:
             if self._config_store.load(config_id) is None:
                 raise KeyError(f"config snapshot not found: {config_id}")
         if (
+            record.config_bundle_id is not None
+            and self._config_bundle_store is not None
+            and self._config_bundle_store.load(record.config_bundle_id) is None
+        ):
+            raise KeyError(f"config bundle not found: {record.config_bundle_id}")
+        if (
             self._manifest_store is not None
             and self._manifest_store.load(record.run_id) is None
         ):
@@ -136,3 +183,8 @@ class LocalExperimentRegistry:
             and self._evaluation_plan_store.load(record.evaluation_plan_id) is None
         ):
             raise KeyError(f"evaluation plan not found: {record.evaluation_plan_id}")
+
+    def _require_config_bundle_store(self) -> ConfigBundleStorePort:
+        if self._config_bundle_store is None:
+            raise ValueError("config_bundle_store is required")
+        return self._config_bundle_store

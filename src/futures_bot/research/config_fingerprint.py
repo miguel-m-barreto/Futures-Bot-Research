@@ -7,7 +7,12 @@ from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 
-from futures_bot.domain.research import ConfigSnapshot, ConfigSnapshotKind
+from futures_bot.domain.research import (
+    ConfigBundle,
+    ConfigBundleEntry,
+    ConfigSnapshot,
+    ConfigSnapshotKind,
+)
 
 
 class CanonicalConfigFingerprinter:
@@ -42,6 +47,49 @@ class CanonicalConfigFingerprinter:
             config_id=config_id,
             kind=kind,
             created_at=created_at,
+            canonical_json=canonical_json,
+            sha256=self.sha256(canonical_json),
+            description=description,
+        )
+
+    def bundle(
+        self,
+        *,
+        bundle_id: str,
+        snapshots: tuple[ConfigSnapshot, ...],
+        created_at: datetime,
+        description: str | None = None,
+    ) -> ConfigBundle:
+        """Build a deterministic metadata-only bundle from config snapshots."""
+        if not snapshots:
+            raise ValueError("snapshots must be non-empty")
+        config_ids = [snapshot.config_id for snapshot in snapshots]
+        if len(set(config_ids)) != len(config_ids):
+            raise ValueError("duplicate config_id values are not allowed")
+        entries = tuple(
+            ConfigBundleEntry(
+                config_id=snapshot.config_id,
+                kind=snapshot.kind,
+                sha256=snapshot.sha256,
+            )
+            for snapshot in sorted(snapshots, key=lambda snapshot: snapshot.config_id)
+        )
+        canonical_json = self.canonicalize(
+            {
+                "entries": [
+                    {
+                        "config_id": entry.config_id,
+                        "kind": entry.kind.value,
+                        "sha256": entry.sha256,
+                    }
+                    for entry in entries
+                ]
+            }
+        )
+        return ConfigBundle(
+            bundle_id=bundle_id,
+            created_at=created_at,
+            entries=entries,
             canonical_json=canonical_json,
             sha256=self.sha256(canonical_json),
             description=description,

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
+    ConfigBundle,
     ConfigSnapshot,
     ConfigSnapshotKind,
     EvaluationArtifactMetadata,
@@ -207,6 +208,36 @@ class InMemoryConfigSnapshotStore:
             sorted(
                 self._snapshots.values(),
                 key=lambda snapshot: (snapshot.created_at, snapshot.config_id),
+            )
+        )
+
+
+class InMemoryConfigBundleStore:
+    """In-memory ConfigBundleStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._bundles: dict[str, ConfigBundle] = {}
+
+    def save(self, bundle: ConfigBundle) -> None:
+        """Save config bundle metadata, rejecting conflicting bundle IDs."""
+        bundle = ConfigBundle.model_validate(bundle.model_dump())
+        existing = self._bundles.get(bundle.bundle_id)
+        if existing is not None:
+            if existing != bundle:
+                raise ValueError(f"bundle_id conflict for {bundle.bundle_id!r}")
+            return
+        self._bundles[bundle.bundle_id] = bundle
+
+    def load(self, bundle_id: str) -> ConfigBundle | None:
+        """Return config bundle by bundle_id, or None."""
+        return self._bundles.get(bundle_id)
+
+    def list_all(self) -> tuple[ConfigBundle, ...]:
+        """Return config bundles sorted by created_at then bundle_id."""
+        return tuple(
+            sorted(
+                self._bundles.values(),
+                key=lambda bundle: (bundle.created_at, bundle.bundle_id),
             )
         )
 

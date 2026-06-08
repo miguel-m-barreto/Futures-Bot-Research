@@ -206,13 +206,7 @@ class ConfigSnapshot(BaseModel):
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, value: str) -> str:
-        if (
-            len(value) != 64
-            or value != value.lower()
-            or any(char not in "0123456789abcdef" for char in value)
-        ):
-            raise ValueError("sha256 must be 64 lowercase hex characters")
-        return value
+        return _validate_sha256_hex(value, "sha256")
 
     @field_validator("description")
     @classmethod
@@ -222,18 +216,90 @@ class ConfigSnapshot(BaseModel):
     @field_validator("canonical_json")
     @classmethod
     def _validate_canonical_json_object(cls, value: str) -> str:
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ValueError("canonical_json must be valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("canonical_json must parse as a JSON object")
-        return value
+        return _validate_exact_canonical_json_object(value, "canonical_json")
 
     @model_validator(mode="after")
     def _validate_sha_matches_canonical_json(self) -> Self:
         expected = hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
         if self.sha256 != expected:
+            raise ValueError("sha256 must match canonical_json UTF-8 SHA-256 digest")
+        return self
+
+
+class ConfigBundleEntry(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    config_id: str
+    sha256: str
+    kind: ConfigSnapshotKind
+
+    @field_validator("config_id")
+    @classmethod
+    def _validate_config_id(cls, value: str) -> str:
+        return _validate_required_text(value, "config_id")
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        return _validate_sha256_hex(value, "sha256")
+
+
+class ConfigBundle(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    bundle_id: str
+    created_at: datetime
+    entries: tuple[ConfigBundleEntry, ...]
+    canonical_json: str
+    sha256: str
+    description: str | None = None
+
+    @field_validator("bundle_id", "canonical_json")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("entries")
+    @classmethod
+    def _validate_entries(
+        cls, value: tuple[ConfigBundleEntry, ...]
+    ) -> tuple[ConfigBundleEntry, ...]:
+        if not value:
+            raise ValueError("entries must be non-empty")
+        config_ids = [entry.config_id for entry in value]
+        if len(set(config_ids)) != len(config_ids):
+            raise ValueError("duplicate config_id values are not allowed")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        return _validate_sha256_hex(value, "sha256")
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "description")
+
+    @field_validator("canonical_json")
+    @classmethod
+    def _validate_canonical_json_object(cls, value: str) -> str:
+        return _validate_exact_canonical_json_object(value, "canonical_json")
+
+    @model_validator(mode="after")
+    def _validate_bundle_integrity(self) -> Self:
+        expected_json = _canonical_config_bundle_json(self.entries)
+        if self.canonical_json != expected_json:
+            raise ValueError(
+                "canonical_json must match deterministic ConfigBundle entries"
+            )
+        expected_sha = hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+        if self.sha256 != expected_sha:
             raise ValueError("sha256 must match canonical_json UTF-8 SHA-256 digest")
         return self
 
@@ -250,6 +316,7 @@ class RunLineageRecord(BaseModel):
     parent_run_id: RunId | None = None
     replay_plan_id: str | None = None
     evaluation_plan_id: str | None = None
+    config_bundle_id: str | None = None
     notes: str | None = None
 
     @field_validator("lineage_id", "experiment_id")
@@ -273,7 +340,7 @@ class RunLineageRecord(BaseModel):
             raise ValueError("duplicate config_ids are not allowed")
         return value
 
-    @field_validator("replay_plan_id", "evaluation_plan_id", "notes")
+    @field_validator("replay_plan_id", "evaluation_plan_id", "config_bundle_id", "notes")
     @classmethod
     def _validate_optional_text_fields(cls, value: str | None) -> str | None:
         return _validate_optional_text(value, "text")
@@ -862,6 +929,70 @@ def _validate_no_duplicate_temporal_windows(
     keys = [_temporal_window_key(window) for window in windows]
     if len(set(keys)) != len(keys):
         raise ValueError("duplicate temporal windows are not allowed")
+
+
+def _validate_sha256_hex(value: str, field_name: str) -> str:
+    if (
+        len(value) != 64
+        or value != value.lower()
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{field_name} must be 64 lowercase hex characters")
+    return value
+
+
+def _validate_exact_canonical_json_object(value: str, field_name: str) -> str:
+    try:
+        parsed = json.loads(value, parse_float=Decimal)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} must parse as a JSON object")
+    if _contains_decimal(parsed):
+        raise ValueError(f"{field_name} must not contain JSON float values")
+    expected = json.dumps(
+        parsed,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    if value != expected:
+        raise ValueError(f"{field_name} must be exact canonical JSON")
+    return value
+
+
+def _contains_decimal(value: object) -> bool:
+    if isinstance(value, Decimal):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_decimal(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_decimal(item) for item in value)
+    return False
+
+
+def _canonical_config_bundle_json(
+    entries: tuple[ConfigBundleEntry, ...],
+) -> str:
+    payload = {
+        "entries": [
+            {
+                "config_id": entry.config_id,
+                "kind": entry.kind.value,
+                "sha256": entry.sha256,
+            }
+            for entry in sorted(
+                entries,
+                key=lambda entry: (entry.config_id, entry.kind.value, entry.sha256),
+            )
+        ]
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
 
 
 def _validate_required_text(value: str, field_name: str) -> str:

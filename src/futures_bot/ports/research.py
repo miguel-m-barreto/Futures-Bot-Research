@@ -4,6 +4,7 @@ from typing import Protocol
 
 from futures_bot.domain.ids import RunId
 from futures_bot.domain.research import (
+    ConfigBundle,
     ConfigSnapshot,
     ConfigSnapshotKind,
     EvaluationArtifactMetadata,
@@ -135,6 +136,22 @@ class ConfigSnapshotStorePort(Protocol):
 
     def list_all(self) -> tuple[ConfigSnapshot, ...]:
         """Return config snapshots in deterministic order."""
+        ...
+
+
+class ConfigBundleStorePort(Protocol):
+    """Persistence abstraction for composed config bundles."""
+
+    def save(self, bundle: ConfigBundle) -> None:
+        """Persist config bundle metadata."""
+        ...
+
+    def load(self, bundle_id: str) -> ConfigBundle | None:
+        """Return config bundle by bundle_id, or None."""
+        ...
+
+    def list_all(self) -> tuple[ConfigBundle, ...]:
+        """Return config bundles in deterministic order."""
         ...
 
 

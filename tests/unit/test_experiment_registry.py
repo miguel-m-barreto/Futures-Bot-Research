@@ -34,6 +34,7 @@ from futures_bot.domain.research import (
     TemporalWindowKind,
 )
 from futures_bot.infrastructure.research.in_memory import (
+    InMemoryConfigBundleStore,
     InMemoryConfigSnapshotStore,
     InMemoryEvaluationPlanStore,
     InMemoryExperimentDefinitionStore,
@@ -42,6 +43,7 @@ from futures_bot.infrastructure.research.in_memory import (
     InMemoryRunLineageStore,
 )
 from futures_bot.ports.research import (
+    ConfigBundleStorePort,
     ConfigSnapshotStorePort,
     ExperimentDefinitionStorePort,
     RunLineageStorePort,
@@ -104,6 +106,7 @@ def _lineage(  # noqa: PLR0913
     parent_run_id: RunId | None = None,
     replay_plan_id: str | None = None,
     evaluation_plan_id: str | None = None,
+    config_bundle_id: str | None = None,
     created_at: datetime | None = None,
 ) -> RunLineageRecord:
     return RunLineageRecord(
@@ -116,6 +119,7 @@ def _lineage(  # noqa: PLR0913
         parent_run_id=parent_run_id,
         replay_plan_id=replay_plan_id,
         evaluation_plan_id=evaluation_plan_id,
+        config_bundle_id=config_bundle_id,
     )
 
 
@@ -243,6 +247,7 @@ def test_run_lineage_record_validation() -> None:
 def test_registry_stores_implement_ports() -> None:
     _: ExperimentDefinitionStorePort = InMemoryExperimentDefinitionStore()
     _: ConfigSnapshotStorePort = InMemoryConfigSnapshotStore()
+    _: ConfigBundleStorePort = InMemoryConfigBundleStore()
     _: RunLineageStorePort = InMemoryRunLineageStore()
 
 
@@ -423,6 +428,31 @@ def test_local_registry_validates_optional_manifest_and_plan_references() -> Non
 
     with pytest.raises(KeyError, match="research run manifest"):
         registry.validate_lineage_references(_lineage(run_id="missing-run"))
+
+
+def test_local_registry_validates_optional_config_bundle_reference() -> None:
+    experiment_store = InMemoryExperimentDefinitionStore()
+    config_store = InMemoryConfigSnapshotStore()
+    bundle_store = InMemoryConfigBundleStore()
+    lineage_store = InMemoryRunLineageStore()
+    registry = LocalExperimentRegistry(
+        experiment_store=experiment_store,
+        config_store=config_store,
+        lineage_store=lineage_store,
+        config_bundle_store=bundle_store,
+    )
+    registry.register_experiment(_experiment())
+    registry.register_config_snapshot(_config())
+    bundle = registry.compose_config_bundle(
+        bundle_id="bundle-1",
+        config_ids=("cfg-1",),
+    )
+    lineage = _lineage(config_bundle_id=bundle.bundle_id)
+    registry.register_lineage(lineage)
+    assert registry.lineage_for_run(RunId("run-1")) == (lineage,)
+
+    with pytest.raises(KeyError, match="config bundle"):
+        registry.validate_lineage_references(_lineage(config_bundle_id="missing-bundle"))
 
 
 def test_registry_modules_have_no_forbidden_imports_or_file_io() -> None:

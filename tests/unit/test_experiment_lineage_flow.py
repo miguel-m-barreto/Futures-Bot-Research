@@ -34,6 +34,7 @@ from futures_bot.domain.research import (
     TemporalWindowKind,
 )
 from futures_bot.infrastructure.research.in_memory import (
+    InMemoryConfigBundleStore,
     InMemoryConfigSnapshotStore,
     InMemoryEvaluationArtifactStore,
     InMemoryEvaluationPlanStore,
@@ -58,6 +59,7 @@ def _utc(day: int, hour: int = 0) -> datetime:
 def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
     experiment_store = InMemoryExperimentDefinitionStore()
     config_store = InMemoryConfigSnapshotStore()
+    bundle_store = InMemoryConfigBundleStore()
     lineage_store = InMemoryRunLineageStore()
     manifest_store = InMemoryResearchRunManifestStore()
     replay_store = InMemoryReplayPlanStore()
@@ -67,6 +69,7 @@ def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
         experiment_store=experiment_store,
         config_store=config_store,
         lineage_store=lineage_store,
+        config_bundle_store=bundle_store,
         manifest_store=manifest_store,
         replay_plan_store=replay_store,
         evaluation_plan_store=evaluation_store,
@@ -123,6 +126,15 @@ def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
         kind=ConfigSnapshotKind.EXECUTION_CONFIG,
         payload={"taker_fee_bps": Decimal("5.0"), "slippage_bps": Decimal("1.0")},
     )
+    config_bundle = registry.compose_config_bundle(
+        bundle_id="bundle-run-1",
+        config_ids=(
+            dataset_config.config_id,
+            replay_config.config_id,
+            evaluation_config.config_id,
+            costs_config.config_id,
+        ),
+    )
 
     expected = ExpectedOutcome(
         setup_id="CONTROL/random",
@@ -156,7 +168,7 @@ def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
             updated_at=_utc(2),
             git_commit="abc123",
             code_branch="main",
-            config_hash=replay_config.sha256,
+            config_hash=config_bundle.sha256,
             dataset=dataset,
             temporal_windows=(window,),
             execution_assumptions=ExecutionAssumptions(
@@ -217,6 +229,7 @@ def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
             ),
             replay_plan_id=replay_plan.replay_plan_id,
             evaluation_plan_id=evaluation_plan.evaluation_plan_id,
+            config_bundle_id=config_bundle.bundle_id,
         )
     )
 
@@ -261,6 +274,17 @@ def test_experiment_lineage_reproducibility_flow_is_metadata_only() -> None:
         evaluation_config,
         costs_config,
     )
+    assert registry.load_config_bundle(config_bundle.bundle_id) == config_bundle
+    assert manifest.config_hash == config_bundle.sha256
+    assert config_bundle.sha256 == registry.compose_config_bundle(
+        bundle_id="bundle-run-1-reordered",
+        config_ids=(
+            costs_config.config_id,
+            evaluation_config.config_id,
+            replay_config.config_id,
+            dataset_config.config_id,
+        ),
+    ).sha256
     assert dataset_config.sha256 == registry.fingerprint_config(
         config_id="cfg-dataset-copy",
         kind=ConfigSnapshotKind.DATASET_CONFIG,
