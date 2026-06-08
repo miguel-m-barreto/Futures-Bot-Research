@@ -44,19 +44,24 @@ def _record(
     source_sequence: int = 0,
     kind: ReplayInputKind = ReplayInputKind.OHLCV_BAR,
 ) -> ReplayInputRecord:
+    payload: dict[str, object]
+    if kind is ReplayInputKind.MARK_PRICE:
+        payload = {"price": Decimal("100")}
+    else:
+        payload = {
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100.5"),
+            "volume": Decimal("12.3"),
+        }
     return ReplayInputRecord(
         record_id=record_id,
         kind=kind,
         instrument=_instrument(),
         event_time=event_time or _utc(1),
         source_sequence=source_sequence,
-        payload={
-            "open": Decimal("100"),
-            "high": Decimal("101"),
-            "low": Decimal("99"),
-            "close": Decimal("100.5"),
-            "volume": Decimal("12.3"),
-        },
+        payload=payload,
     )
 
 

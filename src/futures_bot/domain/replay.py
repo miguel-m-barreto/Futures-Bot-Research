@@ -142,6 +142,11 @@ class ReplayInputRecord(BaseModel):
     def _validate_content_hash(cls, value: str | None) -> str | None:
         return _validate_optional_text(value, "content_hash")
 
+    @model_validator(mode="after")
+    def _validate_payload_for_kind(self) -> Self:
+        _validate_kind_specific_payload(self.kind, self.payload)
+        return self
+
 
 class ReplayInputDataset(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -303,6 +308,178 @@ def _validate_payload_value(value: object) -> None:
             _validate_payload_value(item)
         return
     raise TypeError(f"unsupported payload value type: {type(value).__name__}")
+
+
+def _validate_kind_specific_payload(
+    kind: ReplayInputKind,
+    payload: Mapping[str, object],
+) -> None:
+    if kind is ReplayInputKind.OHLCV_BAR:
+        _validate_ohlcv_payload(payload)
+    elif kind is ReplayInputKind.MARK_PRICE:
+        _require_positive_decimal(payload, "price")
+        _optional_decimal(payload, "funding_rate")
+        _optional_positive_decimal(payload, "index_price")
+    elif kind is ReplayInputKind.INDEX_PRICE:
+        _require_positive_decimal(payload, "price")
+    elif kind is ReplayInputKind.FUNDING_RATE:
+        _require_decimal(payload, "funding_rate")
+        _optional_positive_decimal(payload, "mark_price")
+        _optional_positive_decimal(payload, "index_price")
+    elif kind is ReplayInputKind.OPEN_INTEREST:
+        _require_non_negative_decimal(payload, "open_interest")
+        _optional_non_negative_decimal(payload, "open_interest_value")
+    elif kind is ReplayInputKind.ORDER_BOOK_TOP:
+        _validate_order_book_top_payload(payload)
+    elif kind is ReplayInputKind.TRADE:
+        _validate_trade_payload(payload)
+    elif kind is ReplayInputKind.LIQUIDATION:
+        _validate_liquidation_payload(payload)
+    elif kind is ReplayInputKind.SYNTHETIC_EVENT:
+        _require_non_empty_string(payload, "event_type")
+
+
+def _validate_ohlcv_payload(payload: Mapping[str, object]) -> None:
+    open_price = _require_positive_decimal(payload, "open")
+    high = _require_positive_decimal(payload, "high")
+    low = _require_positive_decimal(payload, "low")
+    close = _require_positive_decimal(payload, "close")
+    _require_non_negative_decimal(payload, "volume")
+    if high < low:
+        raise ValueError("OHLCV_BAR high must be >= low")
+    if high < open_price:
+        raise ValueError("OHLCV_BAR high must be >= open")
+    if high < close:
+        raise ValueError("OHLCV_BAR high must be >= close")
+    if low > open_price:
+        raise ValueError("OHLCV_BAR low must be <= open")
+    if low > close:
+        raise ValueError("OHLCV_BAR low must be <= close")
+    _optional_non_negative_decimal(payload, "quote_volume")
+    _optional_non_negative_decimal(payload, "taker_buy_base_volume")
+    _optional_non_negative_decimal(payload, "taker_buy_quote_volume")
+    _optional_non_negative_int(payload, "trade_count")
+
+
+def _validate_order_book_top_payload(payload: Mapping[str, object]) -> None:
+    bid_price = _require_positive_decimal(payload, "bid_price")
+    ask_price = _require_positive_decimal(payload, "ask_price")
+    _require_non_negative_decimal(payload, "bid_size")
+    _require_non_negative_decimal(payload, "ask_size")
+    if ask_price < bid_price:
+        raise ValueError("ORDER_BOOK_TOP ask_price must be >= bid_price")
+    _optional_non_negative_int(payload, "bid_count")
+    _optional_non_negative_int(payload, "ask_count")
+
+
+def _validate_trade_payload(payload: Mapping[str, object]) -> None:
+    _require_positive_decimal(payload, "price")
+    _require_positive_decimal(payload, "quantity")
+    _optional_side(payload, "side")
+    _optional_non_empty_string(payload, "trade_id")
+
+
+def _validate_liquidation_payload(payload: Mapping[str, object]) -> None:
+    _require_positive_decimal(payload, "price")
+    _require_positive_decimal(payload, "quantity")
+    _require_side(payload, "side")
+    _optional_non_empty_string(payload, "liquidation_id")
+
+
+def _require_field(payload: Mapping[str, object], key: str) -> object:
+    if key not in payload:
+        raise ValueError(f"payload field {key!r} is required")
+    return payload[key]
+
+
+def _require_decimal(payload: Mapping[str, object], key: str) -> Decimal:
+    value = _require_field(payload, key)
+    if not isinstance(value, Decimal):
+        raise ValueError(f"payload field {key!r} must be a Decimal")
+    if not value.is_finite():
+        raise ValueError(f"payload field {key!r} must be finite")
+    return value
+
+
+def _require_positive_decimal(payload: Mapping[str, object], key: str) -> Decimal:
+    value = _require_decimal(payload, key)
+    if value <= 0:
+        raise ValueError(f"payload field {key!r} must be > 0")
+    return value
+
+
+def _require_non_negative_decimal(payload: Mapping[str, object], key: str) -> Decimal:
+    value = _require_decimal(payload, key)
+    if value < 0:
+        raise ValueError(f"payload field {key!r} must be >= 0")
+    return value
+
+
+def _require_non_negative_int(payload: Mapping[str, object], key: str) -> int:
+    value = _require_field(payload, key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"payload field {key!r} must be an integer")
+    if value < 0:
+        raise ValueError(f"payload field {key!r} must be >= 0")
+    return value
+
+
+def _require_non_empty_string(payload: Mapping[str, object], key: str) -> str:
+    value = _require_field(payload, key)
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"payload field {key!r} must be a non-empty string")
+    return value
+
+
+def _require_side(payload: Mapping[str, object], key: str) -> str:
+    value = _require_non_empty_string(payload, key)
+    if value not in {"buy", "sell"}:
+        raise ValueError(f"payload field {key!r} must be 'buy' or 'sell'")
+    return value
+
+
+def _optional_decimal(payload: Mapping[str, object], key: str) -> Decimal | None:
+    if key not in payload:
+        return None
+    return _require_decimal(payload, key)
+
+
+def _optional_positive_decimal(
+    payload: Mapping[str, object], key: str
+) -> Decimal | None:
+    if key not in payload:
+        return None
+    return _require_positive_decimal(payload, key)
+
+
+def _optional_non_negative_decimal(
+    payload: Mapping[str, object], key: str
+) -> Decimal | None:
+    if key not in payload:
+        return None
+    return _require_non_negative_decimal(payload, key)
+
+
+def _optional_non_negative_int(
+    payload: Mapping[str, object], key: str
+) -> int | None:
+    if key not in payload:
+        return None
+    return _require_non_negative_int(payload, key)
+
+
+def _optional_non_empty_string(
+    payload: Mapping[str, object], key: str
+) -> str | None:
+    if key not in payload:
+        return None
+    return _require_non_empty_string(payload, key)
+
+
+def _optional_side(payload: Mapping[str, object], key: str) -> str | None:
+    if key not in payload:
+        return None
+    return _require_side(payload, key)
 
 
 def _validate_required_text(value: str, field_name: str) -> str:

@@ -70,7 +70,13 @@ def _record(record_id: str = "record-1", source_sequence: int = 0) -> ReplayInpu
         instrument=_instrument(),
         event_time=_utc(1),
         source_sequence=source_sequence,
-        payload={"close": Decimal("100")},
+        payload={
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100"),
+            "volume": Decimal("1"),
+        },
     )
 
 
@@ -177,6 +183,50 @@ def test_batch_store_revalidates_model_copy_invalid_state() -> None:
     )
     with pytest.raises(ValidationError, match="source_sequence"):
         store.save(invalid_sequence_batch)
+    invalid_relation_record = _record().model_copy(
+        update={
+            "payload": {
+                "open": Decimal("100"),
+                "high": Decimal("80"),
+                "low": Decimal("90"),
+                "close": Decimal("95"),
+                "volume": Decimal("1"),
+            }
+        }
+    )
+    invalid_relation_batch = _batch().model_copy(
+        update={"records": (invalid_relation_record,)}
+    )
+    with pytest.raises(ValidationError, match="high"):
+        store.save(invalid_relation_batch)
+    invalid_trade_count_record = _record().model_copy(
+        update={
+            "payload": {
+                "open": Decimal("100"),
+                "high": Decimal("110"),
+                "low": Decimal("90"),
+                "close": Decimal("100"),
+                "volume": Decimal("1"),
+                "trade_count": True,
+            }
+        }
+    )
+    invalid_trade_count_batch = _batch().model_copy(
+        update={"records": (invalid_trade_count_record,)}
+    )
+    with pytest.raises(ValidationError, match="trade_count"):
+        store.save(invalid_trade_count_batch)
+    invalid_kind_decimal_record = _record().model_copy(
+        update={
+            "kind": ReplayInputKind.MARK_PRICE,
+            "payload": {"price": Decimal("Infinity")},
+        }
+    )
+    invalid_kind_decimal_batch = _batch().model_copy(
+        update={"records": (invalid_kind_decimal_record,)}
+    )
+    with pytest.raises(ValidationError, match="finite"):
+        store.save(invalid_kind_decimal_batch)
 
 
 def test_in_memory_replay_input_stores_have_no_forbidden_imports() -> None:

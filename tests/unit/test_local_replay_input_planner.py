@@ -136,7 +136,13 @@ def _record() -> ReplayInputRecord:
         instrument=_instrument(),
         event_time=_utc(2, 1),
         source_sequence=0,
-        payload={"close": Decimal("100")},
+        payload={
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100"),
+            "volume": Decimal("1"),
+        },
     )
 
 
