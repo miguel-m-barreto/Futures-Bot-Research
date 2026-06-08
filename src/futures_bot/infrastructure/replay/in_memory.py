@@ -8,6 +8,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
+    ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
     ReplayTimelineCursorStatus,
 )
@@ -204,5 +205,48 @@ class InMemoryReplayTimelineCursorStore:
             sorted(
                 (c for c in self._cursors.values() if c.timeline_id == timeline_id),
                 key=lambda c: (c.updated_at, c.cursor_id),
+            )
+        )
+
+
+class InMemoryReplayTimelineCoverageReportStore:
+    """In-memory ReplayTimelineCoverageReportStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._reports: dict[str, ReplayTimelineCoverageReport] = {}
+
+    def save(self, report: ReplayTimelineCoverageReport) -> None:
+        """Save coverage report metadata, rejecting conflicting IDs."""
+        report = ReplayTimelineCoverageReport.model_validate(report.model_dump())
+        existing = self._reports.get(report.report_id)
+        if existing is not None:
+            if existing != report:
+                raise ValueError(f"report_id conflict for {report.report_id!r}")
+            return
+        self._reports[report.report_id] = report
+
+    def load(self, report_id: str) -> ReplayTimelineCoverageReport | None:
+        """Return coverage report by report_id, or None."""
+        return self._reports.get(report_id)
+
+    def list_for_timeline(
+        self, timeline_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for timeline_id sorted by generated_at then report_id."""
+        return tuple(
+            sorted(
+                (r for r in self._reports.values() if r.timeline_id == timeline_id),
+                key=lambda r: (r.generated_at, r.report_id),
+            )
+        )
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for replay_plan_id sorted by generated_at then report_id."""
+        return tuple(
+            sorted(
+                (r for r in self._reports.values() if r.replay_plan_id == replay_plan_id),
+                key=lambda r: (r.generated_at, r.report_id),
             )
         )

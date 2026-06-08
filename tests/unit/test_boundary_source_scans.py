@@ -287,3 +287,61 @@ def test_replay_timeline_source_files_do_not_import_filesystem_or_process_apis()
         source = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_replay_timeline_coverage_test_files_do_not_import_forbidden_dependencies() -> None:
+    coverage_test_files = (
+        ROOT / "tests/unit/test_replay_timeline_coverage_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_timeline_coverage_store.py",
+        ROOT / "tests/unit/test_local_replay_timeline_coverage_auditor.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_flow.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in coverage_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_timeline_coverage_modules_do_not_import_execution_types() -> None:
+    coverage_paths = (
+        ROOT / "src/futures_bot/domain/replay.py",
+        ROOT / "src/futures_bot/ports/replay.py",
+        ROOT / "src/futures_bot/infrastructure/replay/in_memory.py",
+        ROOT / "src/futures_bot/replay/local.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_timeline_coverage_store.py",
+        ROOT / "tests/unit/test_local_replay_timeline_coverage_auditor.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in coverage_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

@@ -11,10 +11,18 @@ from futures_bot.domain.ids import RunId
 from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
+    ReplayInputKind,
     ReplayInputRecord,
     ReplayInputValidationStatus,
+    ReplayInstrumentRef,
     ReplayOrderingPolicy,
     ReplayTimeline,
+    ReplayTimelineCoverageIssue,
+    ReplayTimelineCoverageIssueKind,
+    ReplayTimelineCoverageIssueSeverity,
+    ReplayTimelineCoverageReport,
+    ReplayTimelineCoverageStatus,
+    ReplayTimelineCoverageSummary,
     ReplayTimelineCursor,
     ReplayTimelineCursorStatus,
     ReplayTimelineEvent,
@@ -24,6 +32,7 @@ from futures_bot.domain.research import ReplayDataSourceKind, TemporalWindow
 from futures_bot.ports.replay import (
     ReplayInputBatchStorePort,
     ReplayInputDatasetStorePort,
+    ReplayTimelineCoverageReportStorePort,
     ReplayTimelineCursorStorePort,
     ReplayTimelineStorePort,
 )
@@ -326,3 +335,251 @@ class LocalReplayTimelineBuilder:
         )
         self._cursor_store.save(new_cursor)
         return new_cursor
+
+
+def _validate_gap_seconds(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("max_event_gap_seconds must be a strict integer")
+    if value <= 0:
+        raise ValueError("max_event_gap_seconds must be > 0")
+
+
+def _instrument_key(instrument: ReplayInstrumentRef) -> str:
+    return f"{instrument.venue}:{instrument.symbol}:{instrument.settlement_asset}"
+
+
+def _count_events(
+    events: tuple[ReplayTimelineEvent, ...],
+) -> tuple[dict[ReplayInputKind, int], dict[str, int], dict[str, int]]:
+    kind_counts: dict[ReplayInputKind, int] = {}
+    instrument_counts: dict[str, int] = {}
+    dataset_counts: dict[str, int] = {}
+    for event in events:
+        kind_counts[event.kind] = kind_counts.get(event.kind, 0) + 1
+        key = _instrument_key(event.instrument)
+        instrument_counts[key] = instrument_counts.get(key, 0) + 1
+        dataset_counts[event.input_dataset_id] = (
+            dataset_counts.get(event.input_dataset_id, 0) + 1
+        )
+    return kind_counts, instrument_counts, dataset_counts
+
+
+def _event_time_bounds(
+    events: tuple[ReplayTimelineEvent, ...],
+) -> tuple[datetime | None, datetime | None]:
+    if not events:
+        return None, None
+    times = [e.event_time for e in events]
+    return min(times), max(times)
+
+
+def _generate_missing_kind_issues(
+    report_id: str,
+    expected_input_kinds: tuple[ReplayInputKind, ...],
+    present_kinds: set[ReplayInputKind],
+) -> list[ReplayTimelineCoverageIssue]:
+    return [
+        ReplayTimelineCoverageIssue(
+            issue_id=f"{report_id}:missing-kind:{kind.value}",
+            kind=ReplayTimelineCoverageIssueKind.MISSING_EXPECTED_KIND,
+            severity=ReplayTimelineCoverageIssueSeverity.WARNING,
+            message=f"Expected input kind {kind.value!r} not found in timeline events",
+            input_kind=kind,
+        )
+        for kind in expected_input_kinds
+        if kind not in present_kinds
+    ]
+
+
+def _generate_missing_instrument_issues(
+    report_id: str,
+    expected_instrument_keys: tuple[str, ...],
+    present_instrument_keys: set[str],
+) -> list[ReplayTimelineCoverageIssue]:
+    return [
+        ReplayTimelineCoverageIssue(
+            issue_id=f"{report_id}:missing-instrument:{ikey}",
+            kind=ReplayTimelineCoverageIssueKind.MISSING_EXPECTED_INSTRUMENT,
+            severity=ReplayTimelineCoverageIssueSeverity.WARNING,
+            message=f"Expected instrument {ikey!r} not found in timeline events",
+            instrument_key=ikey,
+        )
+        for ikey in expected_instrument_keys
+        if ikey not in present_instrument_keys
+    ]
+
+
+def _generate_gap_issues(
+    report_id: str,
+    events: tuple[ReplayTimelineEvent, ...],
+    max_event_gap_seconds: int,
+) -> list[ReplayTimelineCoverageIssue]:
+    issues: list[ReplayTimelineCoverageIssue] = []
+    gap_index = 0
+    for i in range(1, len(events)):
+        gap_secs = (events[i].event_time - events[i - 1].event_time).total_seconds()
+        if gap_secs > max_event_gap_seconds:
+            issues.append(
+                ReplayTimelineCoverageIssue(
+                    issue_id=f"{report_id}:gap:{gap_index}",
+                    kind=ReplayTimelineCoverageIssueKind.EVENT_TIME_GAP,
+                    severity=ReplayTimelineCoverageIssueSeverity.WARNING,
+                    message=(
+                        f"Event time gap of {gap_secs:.0f}s exceeds threshold "
+                        f"before event {events[i].event_id!r}"
+                    ),
+                    event_id=events[i].event_id,
+                )
+            )
+            gap_index += 1
+    return issues
+
+
+def _generate_coverage_gap_issues(
+    report_id: str,
+    events: tuple[ReplayTimelineEvent, ...],
+    temporal_window: TemporalWindow,
+) -> list[ReplayTimelineCoverageIssue]:
+    issues: list[ReplayTimelineCoverageIssue] = []
+    if not events:
+        return issues
+    first_event_at = min(e.event_time for e in events)
+    last_event_at = max(e.event_time for e in events)
+    if first_event_at > temporal_window.start_at:
+        issues.append(
+            ReplayTimelineCoverageIssue(
+                issue_id=f"{report_id}:start-gap",
+                kind=ReplayTimelineCoverageIssueKind.START_COVERAGE_GAP,
+                severity=ReplayTimelineCoverageIssueSeverity.WARNING,
+                message=(
+                    f"First event at {first_event_at.isoformat()} is after "
+                    f"window start {temporal_window.start_at.isoformat()}"
+                ),
+            )
+        )
+    if last_event_at < temporal_window.end_at:
+        issues.append(
+            ReplayTimelineCoverageIssue(
+                issue_id=f"{report_id}:end-gap",
+                kind=ReplayTimelineCoverageIssueKind.END_COVERAGE_GAP,
+                severity=ReplayTimelineCoverageIssueSeverity.WARNING,
+                message=(
+                    f"Last event at {last_event_at.isoformat()} is before "
+                    f"window end {temporal_window.end_at.isoformat()}"
+                ),
+            )
+        )
+    return issues
+
+
+def _count_by_severity(
+    issues: list[ReplayTimelineCoverageIssue],
+) -> dict[ReplayTimelineCoverageIssueSeverity, int]:
+    counts: dict[ReplayTimelineCoverageIssueSeverity, int] = {}
+    for issue in issues:
+        counts[issue.severity] = counts.get(issue.severity, 0) + 1
+    return counts
+
+
+class LocalReplayTimelineCoverageAuditor:
+    """Generate metadata-only coverage audit reports for ReplayTimeline objects.
+
+    No replay execution. No strategy execution. No performance metrics.
+    No file IO. No DB. No Kafka.
+    """
+
+    def __init__(
+        self,
+        *,
+        timeline_store: ReplayTimelineStorePort,
+        report_store: ReplayTimelineCoverageReportStorePort,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._timeline_store = timeline_store
+        self._report_store = report_store
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
+
+    def generate_report(  # noqa: PLR0913 — explicit sprint contract boundary
+        self,
+        report_id: str,
+        timeline_id: str,
+        expected_input_kinds: tuple[ReplayInputKind, ...] = (),
+        expected_instrument_keys: tuple[str, ...] = (),
+        max_event_gap_seconds: int | None = None,
+        notes: str | None = None,
+    ) -> ReplayTimelineCoverageReport:
+        """Generate a metadata-only coverage audit report for a timeline."""
+        if max_event_gap_seconds is not None:
+            _validate_gap_seconds(max_event_gap_seconds)
+        timeline = self._timeline_store.load(timeline_id)
+        if timeline is None:
+            raise ValueError(f"timeline not found: {timeline_id!r}")
+        events = timeline.events
+        issues: list[ReplayTimelineCoverageIssue] = []
+        if not events:
+            issues.append(
+                ReplayTimelineCoverageIssue(
+                    issue_id=f"{report_id}:empty",
+                    kind=ReplayTimelineCoverageIssueKind.EMPTY_TIMELINE,
+                    severity=ReplayTimelineCoverageIssueSeverity.ERROR,
+                    message="Timeline has no events",
+                )
+            )
+        kind_counts, instrument_counts, dataset_counts = _count_events(events)
+        first_event_at, last_event_at = _event_time_bounds(events)
+        present_kinds: set[ReplayInputKind] = set(kind_counts.keys())
+        present_instrument_keys: set[str] = set(instrument_counts.keys())
+        issues.extend(
+            _generate_missing_kind_issues(report_id, expected_input_kinds, present_kinds)
+        )
+        issues.extend(
+            _generate_missing_instrument_issues(
+                report_id, expected_instrument_keys, present_instrument_keys
+            )
+        )
+        if max_event_gap_seconds is not None:
+            issues.extend(_generate_gap_issues(report_id, events, max_event_gap_seconds))
+        issues.extend(
+            _generate_coverage_gap_issues(report_id, events, timeline.temporal_window)
+        )
+        severity_counts = _count_by_severity(issues)
+        summary = ReplayTimelineCoverageSummary(
+            total_events=len(events),
+            first_event_at=first_event_at,
+            last_event_at=last_event_at,
+            event_count_by_kind=kind_counts,
+            event_count_by_instrument=instrument_counts,
+            event_count_by_dataset=dataset_counts,
+            issue_count_by_severity=severity_counts,
+        )
+        report = ReplayTimelineCoverageReport(
+            report_id=report_id,
+            timeline_id=timeline_id,
+            replay_plan_id=timeline.replay_plan_id,
+            temporal_window=timeline.temporal_window,
+            generated_at=self._now(),
+            status=ReplayTimelineCoverageStatus.GENERATED,
+            summary=summary,
+            issues=tuple(issues),
+            expected_input_kinds=expected_input_kinds,
+            expected_instrument_keys=expected_instrument_keys,
+            notes=notes,
+        )
+        self._report_store.save(report)
+        return report
+
+    def load_report(self, report_id: str) -> ReplayTimelineCoverageReport | None:
+        """Return coverage report by report_id, or None."""
+        return self._report_store.load(report_id)
+
+    def reports_for_timeline(
+        self, timeline_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for timeline_id in deterministic order."""
+        return self._report_store.list_for_timeline(timeline_id)
+
+    def reports_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for replay_plan_id in deterministic order."""
+        return self._report_store.list_for_replay_plan(replay_plan_id)

@@ -6,6 +6,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
+    ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
 )
 
@@ -81,4 +82,28 @@ class ReplayTimelineCursorStorePort(Protocol):
 
     def list_for_timeline(self, timeline_id: str) -> tuple[ReplayTimelineCursor, ...]:
         """Return cursors for timeline_id in deterministic order."""
+        ...
+
+
+class ReplayTimelineCoverageReportStorePort(Protocol):
+    """Persistence abstraction for replay timeline coverage report metadata."""
+
+    def save(self, report: ReplayTimelineCoverageReport) -> None:
+        """Persist coverage report metadata."""
+        ...
+
+    def load(self, report_id: str) -> ReplayTimelineCoverageReport | None:
+        """Return coverage report by report_id, or None."""
+        ...
+
+    def list_for_timeline(
+        self, timeline_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for timeline_id in deterministic order."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageReport, ...]:
+        """Return coverage reports for replay_plan_id in deterministic order."""
         ...

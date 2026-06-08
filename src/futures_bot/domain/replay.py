@@ -724,6 +724,201 @@ class ReplayTimelineCursor(BaseModel):
         return self
 
 
+class ReplayTimelineCoverageStatus(StrEnum):
+    PLANNED = "PLANNED"
+    GENERATED = "GENERATED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayTimelineCoverageIssueSeverity(StrEnum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class ReplayTimelineCoverageIssueKind(StrEnum):
+    EMPTY_TIMELINE = "EMPTY_TIMELINE"
+    MISSING_EXPECTED_KIND = "MISSING_EXPECTED_KIND"
+    MISSING_EXPECTED_INSTRUMENT = "MISSING_EXPECTED_INSTRUMENT"
+    EVENT_TIME_GAP = "EVENT_TIME_GAP"
+    START_COVERAGE_GAP = "START_COVERAGE_GAP"
+    END_COVERAGE_GAP = "END_COVERAGE_GAP"
+    DUPLICATE_EVENT_REF = "DUPLICATE_EVENT_REF"
+    ORDERING_ANOMALY = "ORDERING_ANOMALY"
+    OTHER = "OTHER"
+
+
+class ReplayTimelineCoverageIssue(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    issue_id: str
+    kind: ReplayTimelineCoverageIssueKind
+    severity: ReplayTimelineCoverageIssueSeverity
+    message: str
+    event_id: str | None = None
+    instrument_key: str | None = None
+    input_kind: ReplayInputKind | None = None
+    observed_count: int | None = None
+    expected_count: int | None = None
+
+    @field_validator("issue_id", "message")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("event_id", "instrument_key")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "field")
+
+    @field_validator("observed_count", "expected_count", mode="before")
+    @classmethod
+    def _validate_count_fields(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("count must be a strict integer")
+        if value < 0:
+            raise ValueError("count must be >= 0")
+        return value
+
+
+class ReplayTimelineCoverageSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total_events: int
+    first_event_at: datetime | None = None
+    last_event_at: datetime | None = None
+    event_count_by_kind: Mapping[ReplayInputKind, int]
+    event_count_by_instrument: Mapping[str, int]
+    event_count_by_dataset: Mapping[str, int]
+    issue_count_by_severity: Mapping[ReplayTimelineCoverageIssueSeverity, int]
+
+    @field_validator("total_events", mode="before")
+    @classmethod
+    def _validate_total_events(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("total_events must be a strict integer")
+        if value < 0:
+            raise ValueError("total_events must be >= 0")
+        return value
+
+    @field_validator("first_event_at", "last_event_at")
+    @classmethod
+    def _validate_event_times(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return ensure_aware_utc(value)
+
+    @field_validator("event_count_by_kind", "issue_count_by_severity", mode="before")
+    @classmethod
+    def _validate_enum_count_mapping(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("must be a mapping")
+        for v in value.values():
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError("count values must be strict integers")
+            if v < 0:
+                raise ValueError("count values must be >= 0")
+        return value
+
+    @field_validator("event_count_by_instrument", "event_count_by_dataset", mode="before")
+    @classmethod
+    def _validate_str_count_mapping(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("must be a mapping")
+        for k, v in value.items():
+            if not isinstance(k, str) or not k:
+                raise ValueError("mapping keys must be non-empty strings")
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError("count values must be strict integers")
+            if v < 0:
+                raise ValueError("count values must be >= 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_summary(self) -> Self:
+        if self.total_events == 0:
+            if self.first_event_at is not None or self.last_event_at is not None:
+                raise ValueError(
+                    "first_event_at and last_event_at must be None when total_events is 0"
+                )
+            if (
+                self.event_count_by_kind
+                or self.event_count_by_instrument
+                or self.event_count_by_dataset
+            ):
+                raise ValueError(
+                    "event count mappings must be empty when total_events is 0"
+                )
+        elif self.first_event_at is None or self.last_event_at is None:
+            raise ValueError(
+                "first_event_at and last_event_at are required when total_events > 0"
+            )
+        elif self.first_event_at > self.last_event_at:
+            raise ValueError("first_event_at must be <= last_event_at")
+        if self.total_events > 0:
+            n = self.total_events
+            if sum(self.event_count_by_kind.values()) != n:
+                raise ValueError("sum of event_count_by_kind must equal total_events")
+            if sum(self.event_count_by_instrument.values()) != n:
+                raise ValueError("sum of event_count_by_instrument must equal total_events")
+            if sum(self.event_count_by_dataset.values()) != n:
+                raise ValueError("sum of event_count_by_dataset must equal total_events")
+        return self
+
+
+class ReplayTimelineCoverageReport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    report_id: str
+    timeline_id: str
+    replay_plan_id: str
+    temporal_window: TemporalWindow
+    generated_at: datetime
+    status: ReplayTimelineCoverageStatus
+    summary: ReplayTimelineCoverageSummary
+    issues: tuple[ReplayTimelineCoverageIssue, ...] = ()
+    expected_input_kinds: tuple[ReplayInputKind, ...] = ()
+    expected_instrument_keys: tuple[str, ...] = ()
+    notes: str | None = None
+
+    @field_validator("report_id", "timeline_id", "replay_plan_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("generated_at")
+    @classmethod
+    def _validate_generated_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> Self:
+        issue_ids = [i.issue_id for i in self.issues]
+        if len(set(issue_ids)) != len(issue_ids):
+            raise ValueError("duplicate issue_id values are not allowed")
+        if len(set(self.expected_input_kinds)) != len(self.expected_input_kinds):
+            raise ValueError("duplicate expected_input_kinds are not allowed")
+        if len(set(self.expected_instrument_keys)) != len(self.expected_instrument_keys):
+            raise ValueError("duplicate expected_instrument_keys are not allowed")
+        for key in self.expected_instrument_keys:
+            _validate_required_text(key, "expected_instrument_keys element")
+        expected_counts: dict[ReplayTimelineCoverageIssueSeverity, int] = {}
+        for issue in self.issues:
+            expected_counts[issue.severity] = expected_counts.get(issue.severity, 0) + 1
+        if dict(self.summary.issue_count_by_severity) != expected_counts:
+            raise ValueError(
+                "summary.issue_count_by_severity must match the actual issue severity counts"
+            )
+        return self
+
+
 def _validate_event_ordering(
     events: tuple[ReplayTimelineEvent, ...],
     ordering_policy: ReplayOrderingPolicy,
