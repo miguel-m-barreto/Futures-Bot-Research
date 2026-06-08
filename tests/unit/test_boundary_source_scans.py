@@ -192,3 +192,46 @@ def test_research_registry_and_fingerprint_do_not_import_forbidden_dependencies(
         source = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in source
+
+
+def test_replay_domain_ports_and_local_modules_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/replay.py",
+        ROOT / "src/futures_bot/ports/replay.py",
+        ROOT / "src/futures_bot/infrastructure/replay/in_memory.py",
+        ROOT / "src/futures_bot/replay/local.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "open(",
+        "write_text",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source
+
+
+def test_replay_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/replay.py")
+    assert not any("infrastructure" in line for line in lines)

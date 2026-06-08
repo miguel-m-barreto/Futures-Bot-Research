@@ -1,0 +1,319 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime
+from decimal import Decimal
+from enum import StrEnum
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from futures_bot.domain.assets import AssetSymbol, StableCollateralAsset
+from futures_bot.domain.research import TemporalWindow
+from futures_bot.domain.time import ensure_aware_utc
+
+
+class ReplayInputKind(StrEnum):
+    OHLCV_BAR = "OHLCV_BAR"
+    MARK_PRICE = "MARK_PRICE"
+    INDEX_PRICE = "INDEX_PRICE"
+    FUNDING_RATE = "FUNDING_RATE"
+    OPEN_INTEREST = "OPEN_INTEREST"
+    LIQUIDATION = "LIQUIDATION"
+    ORDER_BOOK_TOP = "ORDER_BOOK_TOP"
+    TRADE = "TRADE"
+    SYNTHETIC_EVENT = "SYNTHETIC_EVENT"
+    OTHER = "OTHER"
+
+
+class ReplayInputSourceKind(StrEnum):
+    DATASET_SNAPSHOT = "DATASET_SNAPSHOT"
+    EVENT_JOURNAL = "EVENT_JOURNAL"
+    WAL_SEGMENT = "WAL_SEGMENT"
+    SYNTHETIC_FIXTURE = "SYNTHETIC_FIXTURE"
+    EXTERNAL_REFERENCE = "EXTERNAL_REFERENCE"
+    OTHER = "OTHER"
+
+
+class ReplayInputQuality(StrEnum):
+    RAW = "RAW"
+    NORMALIZED = "NORMALIZED"
+    CLEANED = "CLEANED"
+    SYNTHETIC_FIXTURE = "SYNTHETIC_FIXTURE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ReplayOrderingPolicy(StrEnum):
+    EVENT_TIME_THEN_SEQUENCE = "EVENT_TIME_THEN_SEQUENCE"
+    EVENT_TIME_THEN_KIND_THEN_SEQUENCE = "EVENT_TIME_THEN_KIND_THEN_SEQUENCE"
+    SOURCE_ORDER = "SOURCE_ORDER"
+    OTHER = "OTHER"
+
+
+class ReplayInputValidationStatus(StrEnum):
+    PLANNED = "PLANNED"
+    VALIDATED = "VALIDATED"
+    REJECTED = "REJECTED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayInstrumentRef(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    venue: str
+    symbol: str
+    market_type: str
+    settlement_asset: StableCollateralAsset
+    quote_asset: StableCollateralAsset | None = None
+    base_asset: str | None = None
+
+    @field_validator("venue", "symbol", "market_type")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("settlement_asset", "quote_asset", mode="before")
+    @classmethod
+    def _coerce_stable_asset(cls, value: object) -> object:
+        if value is None:
+            return None
+        if (
+            isinstance(value, dict)
+            and isinstance(value.get("symbol"), dict)
+            and isinstance(value["symbol"].get("value"), str)
+        ):
+            return StableCollateralAsset(value["symbol"]["value"])
+        if isinstance(value, StableCollateralAsset):
+            return value
+        if isinstance(value, AssetSymbol | str):
+            return StableCollateralAsset(value)
+        raise ValueError("stable collateral asset must be USDT or USDC")
+
+    @field_validator("base_asset")
+    @classmethod
+    def _validate_base_asset(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "base_asset")
+
+
+class ReplayInputRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record_id: str
+    kind: ReplayInputKind
+    instrument: ReplayInstrumentRef
+    event_time: datetime
+    source_sequence: int
+    payload: Mapping[str, object]
+    content_hash: str | None = None
+
+    @field_validator("record_id")
+    @classmethod
+    def _validate_record_id(cls, value: str) -> str:
+        return _validate_required_text(value, "record_id")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("source_sequence", mode="before")
+    @classmethod
+    def _validate_source_sequence(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("source_sequence must be an integer")
+        if value < 0:
+            raise ValueError("source_sequence must be >= 0")
+        return value
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _validate_payload_before(cls, value: object) -> object:
+        _validate_payload_mapping(value)
+        return value
+
+    @field_validator("payload")
+    @classmethod
+    def _validate_payload(cls, value: Mapping[str, object]) -> Mapping[str, object]:
+        _validate_payload_mapping(value)
+        return value
+
+    @field_validator("content_hash")
+    @classmethod
+    def _validate_content_hash(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "content_hash")
+
+
+class ReplayInputDataset(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_dataset_id: str
+    dataset_id: str
+    source_kind: ReplayInputSourceKind
+    quality: ReplayInputQuality
+    instruments: tuple[ReplayInstrumentRef, ...]
+    start_at: datetime
+    end_at: datetime
+    created_at: datetime
+    content_hash: str | None = None
+    record_count: int | None = None
+    notes: str | None = None
+
+    @field_validator("input_dataset_id", "dataset_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("start_at", "end_at", "created_at")
+    @classmethod
+    def _validate_datetime(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("instruments")
+    @classmethod
+    def _validate_instruments(
+        cls, value: tuple[ReplayInstrumentRef, ...]
+    ) -> tuple[ReplayInstrumentRef, ...]:
+        if not value:
+            raise ValueError("instruments must be non-empty")
+        keys = [
+            (instrument.venue, instrument.symbol, str(instrument.settlement_asset))
+            for instrument in value
+        ]
+        if len(set(keys)) != len(keys):
+            raise ValueError("duplicate instruments are not allowed")
+        return value
+
+    @field_validator("record_count", mode="before")
+    @classmethod
+    def _validate_record_count(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("record_count must be an integer")
+        if value is not None and value < 0:
+            raise ValueError("record_count must be >= 0")
+        return value
+
+    @field_validator("content_hash", "notes")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "text")
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> Self:
+        if self.start_at >= self.end_at:
+            raise ValueError("start_at must be before end_at")
+        return self
+
+
+class ReplayInputBatch(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    batch_id: str
+    replay_plan_id: str
+    input_dataset_id: str
+    temporal_window: TemporalWindow
+    ordering_policy: ReplayOrderingPolicy
+    records: tuple[ReplayInputRecord, ...]
+    created_at: datetime
+    validation_status: ReplayInputValidationStatus
+    notes: str | None = None
+
+    @field_validator("batch_id", "replay_plan_id", "input_dataset_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_batch(self) -> Self:
+        if not self.records and self.validation_status is not ReplayInputValidationStatus.PLANNED:
+            raise ValueError("records can be empty only for PLANNED batches")
+        record_ids = [record.record_id for record in self.records]
+        if len(set(record_ids)) != len(record_ids):
+            raise ValueError("duplicate record_id values are not allowed")
+        for record in self.records:
+            if (
+                record.event_time < self.temporal_window.start_at
+                or record.event_time >= self.temporal_window.end_at
+            ):
+                raise ValueError("records must be inside temporal_window [start_at, end_at)")
+        _validate_record_ordering(self.records, self.ordering_policy)
+        return self
+
+
+def _validate_record_ordering(
+    records: tuple[ReplayInputRecord, ...],
+    ordering_policy: ReplayOrderingPolicy,
+) -> None:
+    if ordering_policy is ReplayOrderingPolicy.EVENT_TIME_THEN_SEQUENCE:
+        ordered = tuple(sorted(records, key=_event_time_sequence_key))
+    elif ordering_policy is ReplayOrderingPolicy.EVENT_TIME_THEN_KIND_THEN_SEQUENCE:
+        ordered = tuple(sorted(records, key=_event_time_kind_sequence_key))
+    else:
+        return
+    if ordered != records:
+        raise ValueError("records must be sorted according to ordering_policy")
+
+
+def _event_time_sequence_key(record: ReplayInputRecord) -> tuple[datetime, int]:
+    return (record.event_time, record.source_sequence)
+
+
+def _event_time_kind_sequence_key(
+    record: ReplayInputRecord,
+) -> tuple[datetime, str, int]:
+    return (record.event_time, record.kind.value, record.source_sequence)
+
+
+def _validate_payload_mapping(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("payload must be a mapping")
+    if not value:
+        raise ValueError("payload must be non-empty")
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or key != key.strip():
+            raise ValueError("payload keys must be non-empty trimmed strings")
+        _validate_payload_value(item)
+
+
+def _validate_payload_value(value: object) -> None:
+    if isinstance(value, float):
+        raise ValueError("payload values must not contain floats")
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("payload Decimal values must be finite")
+        return
+    if value is None or isinstance(value, str | int | bool):
+        return
+    if isinstance(value, Mapping):
+        _validate_payload_mapping(value)
+        return
+    if isinstance(value, tuple | list):
+        for item in value:
+            _validate_payload_value(item)
+        return
+    raise TypeError(f"unsupported payload value type: {type(value).__name__}")
+
+
+def _validate_required_text(value: str, field_name: str) -> str:
+    if not value or value != value.strip():
+        raise ValueError(f"{field_name} must be a non-empty trimmed string")
+    return value
+
+
+def _validate_optional_text(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not value or value != value.strip():
+        raise ValueError(f"{field_name} must be a non-empty trimmed string")
+    return value
