@@ -494,3 +494,258 @@ def _validate_optional_text(value: str | None, field_name: str) -> str | None:
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
     return value
+
+
+class ReplayTimelineStatus(StrEnum):
+    PLANNED = "PLANNED"
+    BUILT = "BUILT"
+    VALIDATED = "VALIDATED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayTimelineCursorStatus(StrEnum):
+    CREATED = "CREATED"
+    ADVANCED = "ADVANCED"
+    COMPLETED = "COMPLETED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayTimelineEvent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_id: str
+    batch_id: str
+    input_dataset_id: str
+    record_id: str
+    kind: ReplayInputKind
+    instrument: ReplayInstrumentRef
+    event_time: datetime
+    source_sequence: int
+    order_index: int
+    content_hash: str | None = None
+
+    @field_validator("event_id", "batch_id", "input_dataset_id", "record_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("source_sequence", mode="before")
+    @classmethod
+    def _validate_source_sequence(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("source_sequence must be an integer")
+        if value < 0:
+            raise ValueError("source_sequence must be >= 0")
+        return value
+
+    @field_validator("order_index", mode="before")
+    @classmethod
+    def _validate_order_index(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("order_index must be an integer")
+        if value < 0:
+            raise ValueError("order_index must be >= 0")
+        return value
+
+    @field_validator("content_hash")
+    @classmethod
+    def _validate_content_hash(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "content_hash")
+
+
+def _validate_timeline_non_empty_requirements(
+    status: ReplayTimelineStatus,
+    input_batch_ids: tuple[str, ...],
+    input_dataset_ids: tuple[str, ...],
+    events: tuple[ReplayTimelineEvent, ...],
+) -> None:
+    if status is not ReplayTimelineStatus.PLANNED:
+        if not input_batch_ids:
+            raise ValueError("input_batch_ids can be empty only for PLANNED timelines")
+        if not input_dataset_ids:
+            raise ValueError("input_dataset_ids can be empty only for PLANNED timelines")
+        if not events:
+            raise ValueError("events can be empty only for PLANNED timelines")
+
+
+def _validate_timeline_unique_ids(
+    input_batch_ids: tuple[str, ...],
+    input_dataset_ids: tuple[str, ...],
+    events: tuple[ReplayTimelineEvent, ...],
+) -> None:
+    if len(set(input_batch_ids)) != len(input_batch_ids):
+        raise ValueError("duplicate input_batch_ids are not allowed")
+    if len(set(input_dataset_ids)) != len(input_dataset_ids):
+        raise ValueError("duplicate input_dataset_ids are not allowed")
+    event_ids = [e.event_id for e in events]
+    if len(set(event_ids)) != len(event_ids):
+        raise ValueError("duplicate event_id values are not allowed")
+    batch_record_pairs = [(e.batch_id, e.record_id) for e in events]
+    if len(set(batch_record_pairs)) != len(batch_record_pairs):
+        raise ValueError("duplicate (batch_id, record_id) pairs are not allowed")
+
+
+def _validate_timeline_event_window(
+    events: tuple[ReplayTimelineEvent, ...],
+    temporal_window: TemporalWindow,
+) -> None:
+    for event in events:
+        if (
+            event.event_time < temporal_window.start_at
+            or event.event_time >= temporal_window.end_at
+        ):
+            raise ValueError("events must be inside temporal_window [start_at, end_at)")
+
+
+def _validate_timeline_event_sets(
+    events: tuple[ReplayTimelineEvent, ...],
+    input_batch_ids: tuple[str, ...],
+    input_dataset_ids: tuple[str, ...],
+) -> None:
+    if {e.batch_id for e in events} != set(input_batch_ids):
+        raise ValueError("input_batch_ids must match event batch_id set")
+    if {e.input_dataset_id for e in events} != set(input_dataset_ids):
+        raise ValueError("input_dataset_ids must match event input_dataset_id set")
+
+
+def _validate_timeline_order_indexes(events: tuple[ReplayTimelineEvent, ...]) -> None:
+    for i, event in enumerate(events):
+        if event.order_index != i:
+            raise ValueError(
+                "order_index must be contiguous 0..len(events)-1 "
+                "and events must be sorted by order_index"
+            )
+
+
+class ReplayTimeline(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    timeline_id: str
+    replay_plan_id: str
+    temporal_window: TemporalWindow
+    ordering_policy: ReplayOrderingPolicy
+    input_batch_ids: tuple[str, ...]
+    input_dataset_ids: tuple[str, ...]
+    events: tuple[ReplayTimelineEvent, ...]
+    created_at: datetime
+    status: ReplayTimelineStatus
+    notes: str | None = None
+
+    @field_validator("timeline_id", "replay_plan_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_timeline(self) -> Self:
+        _validate_timeline_non_empty_requirements(
+            self.status, self.input_batch_ids, self.input_dataset_ids, self.events
+        )
+        _validate_timeline_unique_ids(
+            self.input_batch_ids, self.input_dataset_ids, self.events
+        )
+        _validate_timeline_event_window(self.events, self.temporal_window)
+        if self.events:
+            _validate_timeline_event_sets(
+                self.events, self.input_batch_ids, self.input_dataset_ids
+            )
+            _validate_timeline_order_indexes(self.events)
+            _validate_event_ordering(self.events, self.ordering_policy)
+        return self
+
+
+class ReplayTimelineCursor(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    cursor_id: str
+    timeline_id: str
+    replay_plan_id: str
+    status: ReplayTimelineCursorStatus
+    next_order_index: int
+    updated_at: datetime
+    completed_at: datetime | None = None
+    notes: str | None = None
+
+    @field_validator("cursor_id", "timeline_id", "replay_plan_id")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("next_order_index", mode="before")
+    @classmethod
+    def _validate_next_order_index(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("next_order_index must be an integer")
+        if value < 0:
+            raise ValueError("next_order_index must be >= 0")
+        return value
+
+    @field_validator("updated_at")
+    @classmethod
+    def _validate_updated_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("completed_at")
+    @classmethod
+    def _validate_completed_at(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_cursor(self) -> Self:
+        if self.status is ReplayTimelineCursorStatus.COMPLETED:
+            if self.completed_at is None:
+                raise ValueError("completed_at is required when status is COMPLETED")
+        elif self.completed_at is not None:
+            raise ValueError("completed_at must be None for non-COMPLETED status")
+        if self.completed_at is not None and self.completed_at < self.updated_at:
+            raise ValueError("completed_at must be >= updated_at")
+        return self
+
+
+def _validate_event_ordering(
+    events: tuple[ReplayTimelineEvent, ...],
+    ordering_policy: ReplayOrderingPolicy,
+) -> None:
+    if not events:
+        return
+    if ordering_policy is ReplayOrderingPolicy.EVENT_TIME_THEN_SEQUENCE:
+        ordered = tuple(
+            sorted(events, key=lambda e: (e.event_time, e.source_sequence, e.event_id))
+        )
+        if ordered != events:
+            raise ValueError(
+                "events must be sorted according to EVENT_TIME_THEN_SEQUENCE policy"
+            )
+    elif ordering_policy is ReplayOrderingPolicy.EVENT_TIME_THEN_KIND_THEN_SEQUENCE:
+        ordered = tuple(
+            sorted(
+                events,
+                key=lambda e: (e.event_time, e.kind.value, e.source_sequence, e.event_id),
+            )
+        )
+        if ordered != events:
+            raise ValueError(
+                "events must be sorted according to EVENT_TIME_THEN_KIND_THEN_SEQUENCE policy"
+            )

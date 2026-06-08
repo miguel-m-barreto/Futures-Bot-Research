@@ -4,7 +4,32 @@ No DB. No filesystem. No Kafka. No market data loading.
 """
 from __future__ import annotations
 
-from futures_bot.domain.replay import ReplayInputBatch, ReplayInputDataset
+from futures_bot.domain.replay import (
+    ReplayInputBatch,
+    ReplayInputDataset,
+    ReplayTimeline,
+    ReplayTimelineCursor,
+    ReplayTimelineCursorStatus,
+)
+
+_CURSOR_ALLOWED_TRANSITIONS: dict[
+    ReplayTimelineCursorStatus, frozenset[ReplayTimelineCursorStatus]
+] = {
+    ReplayTimelineCursorStatus.CREATED: frozenset({
+        ReplayTimelineCursorStatus.ADVANCED,
+        ReplayTimelineCursorStatus.COMPLETED,
+        ReplayTimelineCursorStatus.INVALIDATED,
+    }),
+    ReplayTimelineCursorStatus.ADVANCED: frozenset({
+        ReplayTimelineCursorStatus.ADVANCED,
+        ReplayTimelineCursorStatus.COMPLETED,
+        ReplayTimelineCursorStatus.INVALIDATED,
+    }),
+    ReplayTimelineCursorStatus.COMPLETED: frozenset({
+        ReplayTimelineCursorStatus.INVALIDATED,
+    }),
+    ReplayTimelineCursorStatus.INVALIDATED: frozenset(),
+}
 
 
 class InMemoryReplayInputDatasetStore:
@@ -97,5 +122,87 @@ class InMemoryReplayInputBatchStore:
                     if batch.input_dataset_id == input_dataset_id
                 ),
                 key=lambda batch: (batch.created_at, batch.batch_id),
+            )
+        )
+
+
+class InMemoryReplayTimelineStore:
+    """In-memory ReplayTimelineStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._timelines: dict[str, ReplayTimeline] = {}
+
+    def save(self, timeline: ReplayTimeline) -> None:
+        """Save replay timeline metadata, rejecting conflicting IDs."""
+        timeline = ReplayTimeline.model_validate(timeline.model_dump())
+        existing = self._timelines.get(timeline.timeline_id)
+        if existing is not None:
+            if existing != timeline:
+                raise ValueError(
+                    f"timeline_id conflict for {timeline.timeline_id!r}"
+                )
+            return
+        self._timelines[timeline.timeline_id] = timeline
+
+    def load(self, timeline_id: str) -> ReplayTimeline | None:
+        """Return replay timeline by timeline_id, or None."""
+        return self._timelines.get(timeline_id)
+
+    def list_for_replay_plan(self, replay_plan_id: str) -> tuple[ReplayTimeline, ...]:
+        """Return timelines for replay_plan_id sorted by created_at then timeline_id."""
+        return tuple(
+            sorted(
+                (t for t in self._timelines.values() if t.replay_plan_id == replay_plan_id),
+                key=lambda t: (t.created_at, t.timeline_id),
+            )
+        )
+
+
+class InMemoryReplayTimelineCursorStore:
+    """In-memory ReplayTimelineCursorStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._cursors: dict[str, ReplayTimelineCursor] = {}
+
+    def save(self, cursor: ReplayTimelineCursor) -> None:
+        """Save cursor, enforcing valid state transitions."""
+        cursor = ReplayTimelineCursor.model_validate(cursor.model_dump())
+        existing = self._cursors.get(cursor.cursor_id)
+        if existing is None:
+            self._cursors[cursor.cursor_id] = cursor
+            return
+        if existing.timeline_id != cursor.timeline_id:
+            raise ValueError("cursor timeline_id cannot change")
+        if existing.replay_plan_id != cursor.replay_plan_id:
+            raise ValueError("cursor replay_plan_id cannot change")
+        if cursor == existing:
+            return
+        if cursor.updated_at < existing.updated_at:
+            raise ValueError("cursor updated_at cannot go backwards")
+        if existing.status is ReplayTimelineCursorStatus.INVALIDATED:
+            raise ValueError("INVALIDATED cursor is terminal")
+        allowed = _CURSOR_ALLOWED_TRANSITIONS.get(existing.status, frozenset())
+        if cursor.status not in allowed:
+            raise ValueError(
+                f"invalid cursor transition {existing.status!r} -> {cursor.status!r}"
+            )
+        if (
+            existing.status is ReplayTimelineCursorStatus.ADVANCED
+            and cursor.status is ReplayTimelineCursorStatus.ADVANCED
+            and cursor.next_order_index < existing.next_order_index
+        ):
+            raise ValueError("next_order_index cannot decrease for ADVANCED -> ADVANCED")
+        self._cursors[cursor.cursor_id] = cursor
+
+    def load(self, cursor_id: str) -> ReplayTimelineCursor | None:
+        """Return cursor by cursor_id, or None."""
+        return self._cursors.get(cursor_id)
+
+    def list_for_timeline(self, timeline_id: str) -> tuple[ReplayTimelineCursor, ...]:
+        """Return cursors for timeline_id sorted by updated_at then cursor_id."""
+        return tuple(
+            sorted(
+                (c for c in self._cursors.values() if c.timeline_id == timeline_id),
+                key=lambda c: (c.updated_at, c.cursor_id),
             )
         )

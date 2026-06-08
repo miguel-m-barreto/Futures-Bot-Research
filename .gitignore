@@ -74,3 +74,6 @@ lightning_logs/
 *.tar.gz
 *.tgz
 *.7z
+
+
+.claude

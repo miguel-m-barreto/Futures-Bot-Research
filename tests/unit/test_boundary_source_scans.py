@@ -235,3 +235,55 @@ def test_replay_domain_ports_and_local_modules_do_not_import_forbidden_dependenc
 def test_replay_ports_do_not_import_infrastructure() -> None:
     lines = _import_lines(ROOT / "src/futures_bot/ports/replay.py")
     assert not any("infrastructure" in line for line in lines)
+
+
+def test_replay_timeline_test_files_do_not_import_forbidden_dependencies() -> None:
+    timeline_test_files = (
+        ROOT / "tests/unit/test_replay_timeline_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_timeline_stores.py",
+        ROOT / "tests/unit/test_local_replay_timeline_builder.py",
+        ROOT / "tests/unit/test_replay_timeline_contract_flow.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in timeline_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), f"found {name!r} import in {path.name}"
+
+
+def test_replay_timeline_source_files_do_not_import_filesystem_or_process_apis() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/replay.py",
+        ROOT / "src/futures_bot/infrastructure/replay/in_memory.py",
+        ROOT / "src/futures_bot/replay/local.py",
+    )
+    forbidden = (
+        "open(",
+        "write_text",
+        "read_text",
+        "subprocess",
+        "threading",
+        "asyncio",
+        "sleep",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
