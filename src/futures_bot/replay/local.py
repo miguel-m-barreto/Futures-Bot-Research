@@ -17,6 +17,13 @@ from futures_bot.domain.replay import (
     ReplayInstrumentRef,
     ReplayOrderingPolicy,
     ReplayTimeline,
+    ReplayTimelineCoverageDiff,
+    ReplayTimelineCoverageDiffDirection,
+    ReplayTimelineCoverageDiffItem,
+    ReplayTimelineCoverageDiffKind,
+    ReplayTimelineCoverageDiffSeverity,
+    ReplayTimelineCoverageDiffStatus,
+    ReplayTimelineCoverageDiffSummary,
     ReplayTimelineCoverageIssue,
     ReplayTimelineCoverageIssueKind,
     ReplayTimelineCoverageIssueSeverity,
@@ -32,6 +39,7 @@ from futures_bot.domain.research import ReplayDataSourceKind, TemporalWindow
 from futures_bot.ports.replay import (
     ReplayInputBatchStorePort,
     ReplayInputDatasetStorePort,
+    ReplayTimelineCoverageDiffStorePort,
     ReplayTimelineCoverageReportStorePort,
     ReplayTimelineCursorStorePort,
     ReplayTimelineStorePort,
@@ -583,3 +591,399 @@ class LocalReplayTimelineCoverageAuditor:
     ) -> tuple[ReplayTimelineCoverageReport, ...]:
         """Return coverage reports for replay_plan_id in deterministic order."""
         return self._report_store.list_for_replay_plan(replay_plan_id)
+
+
+def _build_diff_summary(
+    items: list[ReplayTimelineCoverageDiffItem],
+) -> ReplayTimelineCoverageDiffSummary:
+    by_kind: dict[ReplayTimelineCoverageDiffKind, int] = {}
+    by_severity: dict[ReplayTimelineCoverageDiffSeverity, int] = {}
+    for item in items:
+        by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
+        by_severity[item.severity] = by_severity.get(item.severity, 0) + 1
+    has_errors = by_severity.get(ReplayTimelineCoverageDiffSeverity.ERROR, 0) > 0
+    has_warnings = by_severity.get(ReplayTimelineCoverageDiffSeverity.WARNING, 0) > 0
+    return ReplayTimelineCoverageDiffSummary(
+        total_items=len(items),
+        item_count_by_kind=by_kind,
+        item_count_by_severity=by_severity,
+        has_errors=has_errors,
+        has_warnings=has_warnings,
+    )
+
+
+def _diff_status(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    if baseline.status == candidate.status:
+        return []
+    return [
+        ReplayTimelineCoverageDiffItem(
+            item_id=f"{diff_id}:status",
+            kind=ReplayTimelineCoverageDiffKind.REPORT_STATUS_CHANGED,
+            severity=ReplayTimelineCoverageDiffSeverity.INFO,
+            message=(
+                f"Report status changed from {baseline.status.value}"
+                f" to {candidate.status.value}"
+            ),
+            baseline_value=baseline.status.value,
+            candidate_value=candidate.status.value,
+        )
+    ]
+
+
+def _diff_total_events(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_total = baseline.summary.total_events
+    c_total = candidate.summary.total_events
+    if b_total == c_total:
+        return []
+    delta = c_total - b_total
+    if c_total == 0 and b_total > 0:
+        severity = ReplayTimelineCoverageDiffSeverity.ERROR
+    elif delta < 0:
+        severity = ReplayTimelineCoverageDiffSeverity.WARNING
+    else:
+        severity = ReplayTimelineCoverageDiffSeverity.INFO
+    return [
+        ReplayTimelineCoverageDiffItem(
+            item_id=f"{diff_id}:total-events",
+            kind=ReplayTimelineCoverageDiffKind.TOTAL_EVENT_COUNT_CHANGED,
+            severity=severity,
+            message=f"Total event count changed from {b_total} to {c_total}",
+            baseline_value=str(b_total),
+            candidate_value=str(c_total),
+            numeric_delta=delta,
+        )
+    ]
+
+
+def _diff_kind_counts(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_map = dict(baseline.summary.event_count_by_kind)
+    c_map = dict(candidate.summary.event_count_by_kind)
+    all_kinds = sorted(set(b_map) | set(c_map), key=lambda k: k.value)
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for kind in all_kinds:
+        b_count = b_map.get(kind, 0)
+        c_count = c_map.get(kind, 0)
+        if b_count == c_count:
+            continue
+        delta = c_count - b_count
+        severity = (
+            ReplayTimelineCoverageDiffSeverity.WARNING
+            if delta < 0
+            else ReplayTimelineCoverageDiffSeverity.INFO
+        )
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:kind:{kind.value}",
+                kind=ReplayTimelineCoverageDiffKind.KIND_COUNT_CHANGED,
+                severity=severity,
+                message=f"Event count for kind {kind.value} changed from {b_count} to {c_count}",
+                key=kind.value,
+                baseline_value=str(b_count),
+                candidate_value=str(c_count),
+                numeric_delta=delta,
+            )
+        )
+    return items
+
+
+def _diff_instrument_counts(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_map = dict(baseline.summary.event_count_by_instrument)
+    c_map = dict(candidate.summary.event_count_by_instrument)
+    all_keys = sorted(set(b_map) | set(c_map))
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for instrument_key in all_keys:
+        b_count = b_map.get(instrument_key, 0)
+        c_count = c_map.get(instrument_key, 0)
+        if b_count == c_count:
+            continue
+        delta = c_count - b_count
+        severity = (
+            ReplayTimelineCoverageDiffSeverity.WARNING
+            if delta < 0
+            else ReplayTimelineCoverageDiffSeverity.INFO
+        )
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:instrument:{instrument_key}",
+                kind=ReplayTimelineCoverageDiffKind.INSTRUMENT_COUNT_CHANGED,
+                severity=severity,
+                message=(
+                    f"Event count for instrument {instrument_key}"
+                    f" changed from {b_count} to {c_count}"
+                ),
+                key=instrument_key,
+                baseline_value=str(b_count),
+                candidate_value=str(c_count),
+                numeric_delta=delta,
+            )
+        )
+    return items
+
+
+def _diff_dataset_counts(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_map = dict(baseline.summary.event_count_by_dataset)
+    c_map = dict(candidate.summary.event_count_by_dataset)
+    all_keys = sorted(set(b_map) | set(c_map))
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for dataset_id in all_keys:
+        b_count = b_map.get(dataset_id, 0)
+        c_count = c_map.get(dataset_id, 0)
+        if b_count == c_count:
+            continue
+        delta = c_count - b_count
+        severity = (
+            ReplayTimelineCoverageDiffSeverity.WARNING
+            if delta < 0
+            else ReplayTimelineCoverageDiffSeverity.INFO
+        )
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:dataset:{dataset_id}",
+                kind=ReplayTimelineCoverageDiffKind.DATASET_COUNT_CHANGED,
+                severity=severity,
+                message=(
+                    f"Event count for dataset {dataset_id}"
+                    f" changed from {b_count} to {c_count}"
+                ),
+                key=dataset_id,
+                baseline_value=str(b_count),
+                candidate_value=str(c_count),
+                numeric_delta=delta,
+            )
+        )
+    return items
+
+
+def _diff_issue_severity_counts(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_map = dict(baseline.summary.issue_count_by_severity)
+    c_map = dict(candidate.summary.issue_count_by_severity)
+    all_severities = sorted(set(b_map) | set(c_map), key=lambda s: s.value)
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for issue_sev in all_severities:
+        b_count = b_map.get(issue_sev, 0)
+        c_count = c_map.get(issue_sev, 0)
+        if b_count == c_count:
+            continue
+        delta = c_count - b_count
+        if issue_sev is ReplayTimelineCoverageIssueSeverity.ERROR and delta > 0:
+            item_severity = ReplayTimelineCoverageDiffSeverity.ERROR
+        elif (
+            issue_sev
+            in (
+                ReplayTimelineCoverageIssueSeverity.ERROR,
+                ReplayTimelineCoverageIssueSeverity.WARNING,
+            )
+            and delta > 0
+        ):
+            item_severity = ReplayTimelineCoverageDiffSeverity.WARNING
+        else:
+            item_severity = ReplayTimelineCoverageDiffSeverity.INFO
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:issue-severity:{issue_sev.value}",
+                kind=ReplayTimelineCoverageDiffKind.ISSUE_SEVERITY_COUNT_CHANGED,
+                severity=item_severity,
+                message=(
+                    f"Issue count for severity {issue_sev.value}"
+                    f" changed from {b_count} to {c_count}"
+                ),
+                key=issue_sev.value,
+                baseline_value=str(b_count),
+                candidate_value=str(c_count),
+                numeric_delta=delta,
+            )
+        )
+    return items
+
+
+def _diff_expected_kinds(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_kinds = set(baseline.expected_input_kinds)
+    c_kinds = set(candidate.expected_input_kinds)
+    if b_kinds == c_kinds:
+        return []
+    changed_kinds = sorted((b_kinds | c_kinds) - (b_kinds & c_kinds), key=lambda k: k.value)
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for kind in changed_kinds:
+        removed = kind in b_kinds
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:expected-kind:{kind.value}",
+                kind=ReplayTimelineCoverageDiffKind.EXPECTED_KIND_SET_CHANGED,
+                severity=ReplayTimelineCoverageDiffSeverity.INFO,
+                message=f"Expected kind {kind.value} {'removed' if removed else 'added'}",
+                baseline_value=kind.value if removed else None,
+                candidate_value=None if removed else kind.value,
+            )
+        )
+    return items
+
+
+def _diff_expected_instruments(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    b_instruments = set(baseline.expected_instrument_keys)
+    c_instruments = set(candidate.expected_instrument_keys)
+    if b_instruments == c_instruments:
+        return []
+    changed = sorted((b_instruments | c_instruments) - (b_instruments & c_instruments))
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    for instr in changed:
+        removed = instr in b_instruments
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:expected-instrument:{instr}",
+                kind=ReplayTimelineCoverageDiffKind.EXPECTED_INSTRUMENT_SET_CHANGED,
+                severity=ReplayTimelineCoverageDiffSeverity.INFO,
+                message=f"Expected instrument {instr} {'removed' if removed else 'added'}",
+                baseline_value=instr if removed else None,
+                candidate_value=None if removed else instr,
+            )
+        )
+    return items
+
+
+def _diff_event_times(
+    diff_id: str,
+    baseline: ReplayTimelineCoverageReport,
+    candidate: ReplayTimelineCoverageReport,
+) -> list[ReplayTimelineCoverageDiffItem]:
+    items: list[ReplayTimelineCoverageDiffItem] = []
+    if baseline.summary.first_event_at != candidate.summary.first_event_at:
+        b_val = baseline.summary.first_event_at
+        c_val = candidate.summary.first_event_at
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:first-event-at",
+                kind=ReplayTimelineCoverageDiffKind.FIRST_EVENT_TIME_CHANGED,
+                severity=ReplayTimelineCoverageDiffSeverity.INFO,
+                message="First event time changed",
+                baseline_value=b_val.isoformat() if b_val is not None else None,
+                candidate_value=c_val.isoformat() if c_val is not None else None,
+            )
+        )
+    if baseline.summary.last_event_at != candidate.summary.last_event_at:
+        b_val = baseline.summary.last_event_at
+        c_val = candidate.summary.last_event_at
+        items.append(
+            ReplayTimelineCoverageDiffItem(
+                item_id=f"{diff_id}:last-event-at",
+                kind=ReplayTimelineCoverageDiffKind.LAST_EVENT_TIME_CHANGED,
+                severity=ReplayTimelineCoverageDiffSeverity.INFO,
+                message="Last event time changed",
+                baseline_value=b_val.isoformat() if b_val is not None else None,
+                candidate_value=c_val.isoformat() if c_val is not None else None,
+            )
+        )
+    return items
+
+
+class LocalReplayTimelineCoverageDiffer:
+    """Generate metadata-only coverage diffs between two ReplayTimelineCoverageReport objects.
+
+    No replay execution. No strategy execution. No performance metrics.
+    No file IO. No DB. No Kafka.
+    """
+
+    def __init__(
+        self,
+        *,
+        report_store: ReplayTimelineCoverageReportStorePort,
+        diff_store: ReplayTimelineCoverageDiffStorePort,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._report_store = report_store
+        self._diff_store = diff_store
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
+
+    def generate_diff(
+        self,
+        diff_id: str,
+        baseline_report_id: str,
+        candidate_report_id: str,
+        notes: str | None = None,
+    ) -> ReplayTimelineCoverageDiff:
+        """Generate a metadata-only diff between two coverage reports."""
+        if baseline_report_id == candidate_report_id:
+            raise ValueError(
+                "baseline_report_id and candidate_report_id must differ"
+            )
+        baseline = self._report_store.load(baseline_report_id)
+        if baseline is None:
+            raise ValueError(f"baseline report not found: {baseline_report_id!r}")
+        candidate = self._report_store.load(candidate_report_id)
+        if candidate is None:
+            raise ValueError(f"candidate report not found: {candidate_report_id!r}")
+        items: list[ReplayTimelineCoverageDiffItem] = []
+        items.extend(_diff_status(diff_id, baseline, candidate))
+        items.extend(_diff_total_events(diff_id, baseline, candidate))
+        items.extend(_diff_kind_counts(diff_id, baseline, candidate))
+        items.extend(_diff_instrument_counts(diff_id, baseline, candidate))
+        items.extend(_diff_dataset_counts(diff_id, baseline, candidate))
+        items.extend(_diff_issue_severity_counts(diff_id, baseline, candidate))
+        items.extend(_diff_expected_kinds(diff_id, baseline, candidate))
+        items.extend(_diff_expected_instruments(diff_id, baseline, candidate))
+        items.extend(_diff_event_times(diff_id, baseline, candidate))
+        summary = _build_diff_summary(items)
+        diff = ReplayTimelineCoverageDiff(
+            diff_id=diff_id,
+            baseline_report_id=baseline_report_id,
+            candidate_report_id=candidate_report_id,
+            baseline_timeline_id=baseline.timeline_id,
+            candidate_timeline_id=candidate.timeline_id,
+            baseline_replay_plan_id=baseline.replay_plan_id,
+            candidate_replay_plan_id=candidate.replay_plan_id,
+            generated_at=self._now(),
+            status=ReplayTimelineCoverageDiffStatus.GENERATED,
+            direction=ReplayTimelineCoverageDiffDirection.BASELINE_TO_CANDIDATE,
+            summary=summary,
+            items=tuple(items),
+            notes=notes,
+        )
+        self._diff_store.save(diff)
+        return diff
+
+    def load_diff(self, diff_id: str) -> ReplayTimelineCoverageDiff | None:
+        """Return coverage diff by diff_id, or None."""
+        return self._diff_store.load(diff_id)
+
+    def diffs_for_report(
+        self, report_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs involving report_id in deterministic order."""
+        return self._diff_store.list_for_report(report_id)
+
+    def diffs_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs involving replay_plan_id in deterministic order."""
+        return self._diff_store.list_for_replay_plan(replay_plan_id)

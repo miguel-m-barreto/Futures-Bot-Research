@@ -345,3 +345,61 @@ def test_replay_timeline_coverage_modules_do_not_import_execution_types() -> Non
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_replay_timeline_coverage_diff_test_files_do_not_import_forbidden_dependencies() -> None:
+    diff_test_files = (
+        ROOT / "tests/unit/test_replay_timeline_coverage_diff_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_timeline_coverage_diff_store.py",
+        ROOT / "tests/unit/test_local_replay_timeline_coverage_differ.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_diff_flow.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in diff_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_timeline_coverage_diff_modules_do_not_import_execution_types() -> None:
+    diff_paths = (
+        ROOT / "src/futures_bot/domain/replay.py",
+        ROOT / "src/futures_bot/ports/replay.py",
+        ROOT / "src/futures_bot/infrastructure/replay/in_memory.py",
+        ROOT / "src/futures_bot/replay/local.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_diff_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_timeline_coverage_diff_store.py",
+        ROOT / "tests/unit/test_local_replay_timeline_coverage_differ.py",
+        ROOT / "tests/unit/test_replay_timeline_coverage_diff_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in diff_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

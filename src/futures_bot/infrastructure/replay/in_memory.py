@@ -8,6 +8,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
+    ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
     ReplayTimelineCursorStatus,
@@ -248,5 +249,64 @@ class InMemoryReplayTimelineCoverageReportStore:
             sorted(
                 (r for r in self._reports.values() if r.replay_plan_id == replay_plan_id),
                 key=lambda r: (r.generated_at, r.report_id),
+            )
+        )
+
+
+class InMemoryReplayTimelineCoverageDiffStore:
+    """In-memory ReplayTimelineCoverageDiffStorePort implementation."""
+
+    def __init__(self) -> None:
+        self._diffs: dict[str, ReplayTimelineCoverageDiff] = {}
+
+    def save(self, diff: ReplayTimelineCoverageDiff) -> None:
+        """Save coverage diff metadata, rejecting conflicting IDs."""
+        diff = ReplayTimelineCoverageDiff.model_validate(diff.model_dump())
+        existing = self._diffs.get(diff.diff_id)
+        if existing is not None:
+            if existing != diff:
+                raise ValueError(f"diff_id conflict for {diff.diff_id!r}")
+            return
+        self._diffs[diff.diff_id] = diff
+
+    def load(self, diff_id: str) -> ReplayTimelineCoverageDiff | None:
+        """Return coverage diff by diff_id, or None."""
+        return self._diffs.get(diff_id)
+
+    def list_for_report(
+        self, report_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs where baseline_report_id or candidate_report_id matches."""
+        return tuple(
+            sorted(
+                (
+                    d for d in self._diffs.values()
+                    if report_id in {d.baseline_report_id, d.candidate_report_id}
+                ),
+                key=lambda d: (d.generated_at, d.diff_id),
+            )
+        )
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs where baseline_replay_plan_id or candidate_replay_plan_id matches."""
+        return tuple(
+            sorted(
+                (
+                    d for d in self._diffs.values()
+                    if replay_plan_id
+                    in {d.baseline_replay_plan_id, d.candidate_replay_plan_id}
+                ),
+                key=lambda d: (d.generated_at, d.diff_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return all diffs sorted by generated_at then diff_id."""
+        return tuple(
+            sorted(
+                self._diffs.values(),
+                key=lambda d: (d.generated_at, d.diff_id),
             )
         )

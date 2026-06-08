@@ -6,6 +6,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
+    ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
 )
@@ -106,4 +107,32 @@ class ReplayTimelineCoverageReportStorePort(Protocol):
         self, replay_plan_id: str
     ) -> tuple[ReplayTimelineCoverageReport, ...]:
         """Return coverage reports for replay_plan_id in deterministic order."""
+        ...
+
+
+class ReplayTimelineCoverageDiffStorePort(Protocol):
+    """Persistence abstraction for replay timeline coverage diff metadata."""
+
+    def save(self, diff: ReplayTimelineCoverageDiff) -> None:
+        """Persist coverage diff metadata."""
+        ...
+
+    def load(self, diff_id: str) -> ReplayTimelineCoverageDiff | None:
+        """Return coverage diff by diff_id, or None."""
+        ...
+
+    def list_for_report(
+        self, report_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs where baseline_report_id or candidate_report_id matches."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return diffs where baseline_replay_plan_id or candidate_replay_plan_id matches."""
+        ...
+
+    def list_all(self) -> tuple[ReplayTimelineCoverageDiff, ...]:
+        """Return all diffs in deterministic order."""
         ...

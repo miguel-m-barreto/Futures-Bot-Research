@@ -919,6 +919,194 @@ class ReplayTimelineCoverageReport(BaseModel):
         return self
 
 
+class ReplayTimelineCoverageDiffStatus(StrEnum):
+    PLANNED = "PLANNED"
+    GENERATED = "GENERATED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayTimelineCoverageDiffDirection(StrEnum):
+    BASELINE_TO_CANDIDATE = "BASELINE_TO_CANDIDATE"
+
+
+class ReplayTimelineCoverageDiffSeverity(StrEnum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class ReplayTimelineCoverageDiffKind(StrEnum):
+    TOTAL_EVENT_COUNT_CHANGED = "TOTAL_EVENT_COUNT_CHANGED"
+    KIND_COUNT_CHANGED = "KIND_COUNT_CHANGED"
+    INSTRUMENT_COUNT_CHANGED = "INSTRUMENT_COUNT_CHANGED"
+    DATASET_COUNT_CHANGED = "DATASET_COUNT_CHANGED"
+    ISSUE_SEVERITY_COUNT_CHANGED = "ISSUE_SEVERITY_COUNT_CHANGED"
+    EXPECTED_KIND_SET_CHANGED = "EXPECTED_KIND_SET_CHANGED"
+    EXPECTED_INSTRUMENT_SET_CHANGED = "EXPECTED_INSTRUMENT_SET_CHANGED"
+    FIRST_EVENT_TIME_CHANGED = "FIRST_EVENT_TIME_CHANGED"
+    LAST_EVENT_TIME_CHANGED = "LAST_EVENT_TIME_CHANGED"
+    REPORT_STATUS_CHANGED = "REPORT_STATUS_CHANGED"
+    OTHER = "OTHER"
+
+
+class ReplayTimelineCoverageDiffItem(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    item_id: str
+    kind: ReplayTimelineCoverageDiffKind
+    severity: ReplayTimelineCoverageDiffSeverity
+    message: str
+    key: str | None = None
+    baseline_value: str | None = None
+    candidate_value: str | None = None
+    numeric_delta: int | None = None
+
+    @field_validator("item_id", "message")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("key", "baseline_value", "candidate_value")
+    @classmethod
+    def _validate_optional_text_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "field")
+
+    @field_validator("numeric_delta", mode="before")
+    @classmethod
+    def _validate_numeric_delta(cls, value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("numeric_delta must be a strict integer")
+        return value
+
+
+class ReplayTimelineCoverageDiffSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total_items: int
+    item_count_by_kind: Mapping[ReplayTimelineCoverageDiffKind, int]
+    item_count_by_severity: Mapping[ReplayTimelineCoverageDiffSeverity, int]
+    has_errors: bool
+    has_warnings: bool
+
+    @field_validator("total_items", mode="before")
+    @classmethod
+    def _validate_total_items(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("total_items must be a strict integer")
+        if value < 0:
+            raise ValueError("total_items must be >= 0")
+        return value
+
+    @field_validator("item_count_by_kind", "item_count_by_severity", mode="before")
+    @classmethod
+    def _validate_count_mapping(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            raise ValueError("must be a mapping")
+        for v in value.values():
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError("count values must be strict integers")
+            if v < 0:
+                raise ValueError("count values must be >= 0")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_diff_summary(self) -> Self:
+        if self.total_items == 0:
+            if self.item_count_by_kind or self.item_count_by_severity:
+                raise ValueError("count mappings must be empty when total_items is 0")
+            if self.has_errors or self.has_warnings:
+                raise ValueError(
+                    "has_errors and has_warnings must be False when total_items is 0"
+                )
+        else:
+            if sum(self.item_count_by_kind.values()) != self.total_items:
+                raise ValueError("sum of item_count_by_kind must equal total_items")
+            if sum(self.item_count_by_severity.values()) != self.total_items:
+                raise ValueError("sum of item_count_by_severity must equal total_items")
+        error_count = dict(self.item_count_by_severity).get(
+            ReplayTimelineCoverageDiffSeverity.ERROR, 0
+        )
+        warning_count = dict(self.item_count_by_severity).get(
+            ReplayTimelineCoverageDiffSeverity.WARNING, 0
+        )
+        if self.has_errors != (error_count > 0):
+            raise ValueError("has_errors must match whether ERROR count > 0")
+        if self.has_warnings != (warning_count > 0):
+            raise ValueError("has_warnings must match whether WARNING count > 0")
+        return self
+
+
+class ReplayTimelineCoverageDiff(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    diff_id: str
+    baseline_report_id: str
+    candidate_report_id: str
+    baseline_timeline_id: str
+    candidate_timeline_id: str
+    baseline_replay_plan_id: str
+    candidate_replay_plan_id: str
+    generated_at: datetime
+    status: ReplayTimelineCoverageDiffStatus
+    direction: ReplayTimelineCoverageDiffDirection = (
+        ReplayTimelineCoverageDiffDirection.BASELINE_TO_CANDIDATE
+    )
+    summary: ReplayTimelineCoverageDiffSummary
+    items: tuple[ReplayTimelineCoverageDiffItem, ...] = ()
+    notes: str | None = None
+
+    @field_validator(
+        "diff_id",
+        "baseline_report_id",
+        "candidate_report_id",
+        "baseline_timeline_id",
+        "candidate_timeline_id",
+        "baseline_replay_plan_id",
+        "candidate_replay_plan_id",
+    )
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("generated_at")
+    @classmethod
+    def _validate_generated_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_diff(self) -> Self:
+        if self.baseline_report_id == self.candidate_report_id:
+            raise ValueError(
+                "baseline_report_id and candidate_report_id must differ"
+            )
+        item_ids = [item.item_id for item in self.items]
+        if len(set(item_ids)) != len(item_ids):
+            raise ValueError("duplicate item_id values are not allowed")
+        if self.summary.total_items != len(self.items):
+            raise ValueError("summary.total_items must equal len(items)")
+        by_kind: dict[ReplayTimelineCoverageDiffKind, int] = {}
+        by_severity: dict[ReplayTimelineCoverageDiffSeverity, int] = {}
+        for item in self.items:
+            by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
+            by_severity[item.severity] = by_severity.get(item.severity, 0) + 1
+        if dict(self.summary.item_count_by_kind) != by_kind:
+            raise ValueError(
+                "summary.item_count_by_kind must match actual item kind counts"
+            )
+        if dict(self.summary.item_count_by_severity) != by_severity:
+            raise ValueError(
+                "summary.item_count_by_severity must match actual item severity counts"
+            )
+        return self
+
+
 def _validate_event_ordering(
     events: tuple[ReplayTimelineEvent, ...],
     ordering_policy: ReplayOrderingPolicy,
