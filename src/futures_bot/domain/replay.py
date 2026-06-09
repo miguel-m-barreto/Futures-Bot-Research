@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
@@ -1132,3 +1135,141 @@ def _validate_event_ordering(
             raise ValueError(
                 "events must be sorted according to EVENT_TIME_THEN_KIND_THEN_SEQUENCE policy"
             )
+
+
+def _check_no_floats_in_json(value: object, path: str = "root") -> None:
+    if isinstance(value, float):
+        raise ValueError(f"float value at {path!r} not allowed in canonical payload")
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _check_no_floats_in_json(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _check_no_floats_in_json(v, f"{path}[{i}]")
+
+
+class ReplayArtifactKind(StrEnum):
+    TIMELINE = "TIMELINE"
+    COVERAGE_REPORT = "COVERAGE_REPORT"
+    COVERAGE_DIFF = "COVERAGE_DIFF"
+
+
+class ReplayArtifactFingerprintStatus(StrEnum):
+    GENERATED = "GENERATED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayArtifactHashAlgorithm(StrEnum):
+    SHA256 = "SHA256"
+
+
+_ARTIFACT_ID_FIELD: dict[ReplayArtifactKind, str] = {
+    ReplayArtifactKind.TIMELINE: "timeline_id",
+    ReplayArtifactKind.COVERAGE_REPORT: "report_id",
+    ReplayArtifactKind.COVERAGE_DIFF: "diff_id",
+}
+
+
+def _validate_plan_id_in_payload(
+    artifact_kind: ReplayArtifactKind,
+    artifact: dict[str, object],
+    replay_plan_id: str,
+) -> None:
+    if artifact_kind is ReplayArtifactKind.COVERAGE_DIFF:
+        if artifact.get("baseline_replay_plan_id") != replay_plan_id:
+            raise ValueError(
+                "canonical_payload baseline_replay_plan_id does not match replay_plan_id"
+            )
+        if artifact.get("candidate_replay_plan_id") != replay_plan_id:
+            raise ValueError(
+                "canonical_payload candidate_replay_plan_id does not match replay_plan_id"
+            )
+    elif artifact.get("replay_plan_id") != replay_plan_id:
+        raise ValueError("canonical_payload replay_plan_id does not match self.replay_plan_id")
+
+
+class ReplayArtifactFingerprint(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    fingerprint_id: str
+    artifact_kind: ReplayArtifactKind
+    artifact_id: str
+    replay_plan_id: str | None = None
+    generated_at: datetime
+    status: ReplayArtifactFingerprintStatus
+    hash_algorithm: ReplayArtifactHashAlgorithm = ReplayArtifactHashAlgorithm.SHA256
+    canonical_payload: str
+    sha256: str
+    notes: str | None = None
+
+    @field_validator("fingerprint_id", "artifact_id")
+    @classmethod
+    def _validate_required_ids(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("replay_plan_id")
+    @classmethod
+    def _validate_replay_plan_id(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "replay_plan_id")
+
+    @field_validator("generated_at")
+    @classmethod
+    def _validate_generated_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("canonical_payload")
+    @classmethod
+    def _validate_canonical_payload_format(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("canonical_payload must not be empty or blank")
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"canonical_payload is not valid JSON: {e}") from e
+        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if canonical != value:
+            raise ValueError("canonical_payload must be compact sorted JSON")
+        _check_no_floats_in_json(parsed)
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256_format(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("sha256 must be a 64-character lowercase hex string")
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_sha_and_consistency(self) -> Self:
+        expected = hashlib.sha256(self.canonical_payload.encode("utf-8")).hexdigest()
+        if self.sha256 != expected:
+            raise ValueError("sha256 does not match sha256(canonical_payload)")
+        parsed = json.loads(self.canonical_payload)
+        if not isinstance(parsed, dict):
+            raise ValueError("canonical_payload must be a JSON object")
+        if "artifact_kind" not in parsed:
+            raise ValueError("canonical_payload must have top-level 'artifact_kind'")
+        if "artifact" not in parsed:
+            raise ValueError("canonical_payload must have top-level 'artifact'")
+        if parsed["artifact_kind"] != self.artifact_kind.value:
+            raise ValueError(
+                "canonical_payload artifact_kind does not match self.artifact_kind"
+            )
+        artifact = parsed["artifact"]
+        if not isinstance(artifact, dict):
+            raise ValueError("canonical_payload 'artifact' must be a JSON object")
+        id_field = _ARTIFACT_ID_FIELD[self.artifact_kind]
+        if id_field not in artifact:
+            raise ValueError(f"canonical_payload artifact must have '{id_field}'")
+        if artifact[id_field] != self.artifact_id:
+            raise ValueError(
+                f"canonical_payload artifact.{id_field} does not match artifact_id"
+            )
+        if self.replay_plan_id is not None:
+            _validate_plan_id_in_payload(self.artifact_kind, artifact, self.replay_plan_id)
+        return self

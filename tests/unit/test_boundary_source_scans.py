@@ -403,3 +403,63 @@ def test_replay_timeline_coverage_diff_modules_do_not_import_execution_types() -
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_replay_artifact_fingerprint_source_does_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "open(",
+        "write_text",
+        "read_text",
+    )
+    for path in source_paths:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_replay_artifact_fingerprint_modules_do_not_import_execution_types() -> None:
+    fingerprint_paths = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_artifact_fingerprint_store.py",
+        ROOT / "tests/unit/test_local_replay_artifact_fingerprinter.py",
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in fingerprint_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

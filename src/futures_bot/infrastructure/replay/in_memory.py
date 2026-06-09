@@ -5,6 +5,8 @@ No DB. No filesystem. No Kafka. No market data loading.
 from __future__ import annotations
 
 from futures_bot.domain.replay import (
+    ReplayArtifactFingerprint,
+    ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
@@ -308,5 +310,65 @@ class InMemoryReplayTimelineCoverageDiffStore:
             sorted(
                 self._diffs.values(),
                 key=lambda d: (d.generated_at, d.diff_id),
+            )
+        )
+
+
+class InMemoryReplayArtifactFingerprintStore:
+    """In-memory store for replay artifact integrity fingerprints."""
+
+    def __init__(self) -> None:
+        self._fingerprints: dict[str, ReplayArtifactFingerprint] = {}
+
+    def save(self, fingerprint: ReplayArtifactFingerprint) -> None:
+        """Persist fingerprint; idempotent if identical, raises on conflict."""
+        fingerprint = ReplayArtifactFingerprint.model_validate(fingerprint.model_dump())
+        existing = self._fingerprints.get(fingerprint.fingerprint_id)
+        if existing is not None:
+            if existing != fingerprint:
+                raise ValueError(
+                    f"fingerprint_id conflict for {fingerprint.fingerprint_id!r}"
+                )
+            return
+        self._fingerprints[fingerprint.fingerprint_id] = fingerprint
+
+    def load(self, fingerprint_id: str) -> ReplayArtifactFingerprint | None:
+        """Return fingerprint by fingerprint_id, or None."""
+        return self._fingerprints.get(fingerprint_id)
+
+    def list_for_artifact(
+        self, artifact_kind: ReplayArtifactKind, artifact_id: str
+    ) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return fingerprints for (artifact_kind, artifact_id) in deterministic order."""
+        return tuple(
+            sorted(
+                (
+                    f for f in self._fingerprints.values()
+                    if f.artifact_kind is artifact_kind and f.artifact_id == artifact_id
+                ),
+                key=lambda f: (f.generated_at, f.fingerprint_id),
+            )
+        )
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return fingerprints where replay_plan_id matches, in deterministic order."""
+        return tuple(
+            sorted(
+                (
+                    f for f in self._fingerprints.values()
+                    if f.replay_plan_id == replay_plan_id
+                ),
+                key=lambda f: (f.generated_at, f.fingerprint_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return all fingerprints sorted by generated_at then fingerprint_id."""
+        return tuple(
+            sorted(
+                self._fingerprints.values(),
+                key=lambda f: (f.generated_at, f.fingerprint_id),
             )
         )

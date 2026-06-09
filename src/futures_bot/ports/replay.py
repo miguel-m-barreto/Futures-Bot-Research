@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Protocol
 
 from futures_bot.domain.replay import (
+    ReplayArtifactFingerprint,
+    ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayTimeline,
@@ -135,4 +137,32 @@ class ReplayTimelineCoverageDiffStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayTimelineCoverageDiff, ...]:
         """Return all diffs in deterministic order."""
+        ...
+
+
+class ReplayArtifactFingerprintStorePort(Protocol):
+    """Persistence abstraction for replay artifact integrity fingerprints."""
+
+    def save(self, fingerprint: ReplayArtifactFingerprint) -> None:
+        """Persist fingerprint; idempotent if identical, raises on conflict."""
+        ...
+
+    def load(self, fingerprint_id: str) -> ReplayArtifactFingerprint | None:
+        """Return fingerprint by fingerprint_id, or None."""
+        ...
+
+    def list_for_artifact(
+        self, artifact_kind: ReplayArtifactKind, artifact_id: str
+    ) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return fingerprints for (artifact_kind, artifact_id) in deterministic order."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return fingerprints where replay_plan_id matches, in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprint, ...]:
+        """Return all fingerprints in deterministic order."""
         ...
