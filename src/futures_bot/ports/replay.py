@@ -4,6 +4,7 @@ from typing import Protocol
 
 from futures_bot.domain.replay import (
     ReplayArtifactFingerprint,
+    ReplayArtifactFingerprintVerification,
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
@@ -165,4 +166,40 @@ class ReplayArtifactFingerprintStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayArtifactFingerprint, ...]:
         """Return all fingerprints in deterministic order."""
+        ...
+
+
+class ReplayArtifactFingerprintVerificationStorePort(Protocol):
+    """Persistence abstraction for replay artifact fingerprint verifications."""
+
+    def save(self, verification: ReplayArtifactFingerprintVerification) -> None:
+        """Persist verification; idempotent if identical, raises on conflict."""
+        ...
+
+    def load(
+        self, verification_id: str
+    ) -> ReplayArtifactFingerprintVerification | None:
+        """Return verification by verification_id, or None."""
+        ...
+
+    def list_for_fingerprint(
+        self, fingerprint_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications for fingerprint_id in deterministic order."""
+        ...
+
+    def list_for_artifact(
+        self, artifact_kind: ReplayArtifactKind, artifact_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications for (artifact_kind, artifact_id) in deterministic order."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications where replay_plan_id matches, in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return all verifications in deterministic order."""
         ...

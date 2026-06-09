@@ -1273,3 +1273,263 @@ class ReplayArtifactFingerprint(BaseModel):
         if self.replay_plan_id is not None:
             _validate_plan_id_in_payload(self.artifact_kind, artifact, self.replay_plan_id)
         return self
+
+
+class ReplayArtifactFingerprintVerificationStatus(StrEnum):
+    VALID = "VALID"
+    MISMATCH = "MISMATCH"
+    MISSING_FINGERPRINT = "MISSING_FINGERPRINT"
+    MISSING_ARTIFACT = "MISSING_ARTIFACT"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayArtifactFingerprintVerificationIssueKind(StrEnum):
+    FINGERPRINT_NOT_FOUND = "FINGERPRINT_NOT_FOUND"
+    ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
+    HASH_MISMATCH = "HASH_MISMATCH"
+    CANONICAL_PAYLOAD_MISMATCH = "CANONICAL_PAYLOAD_MISMATCH"
+    ARTIFACT_KIND_MISMATCH = "ARTIFACT_KIND_MISMATCH"
+    ARTIFACT_ID_MISMATCH = "ARTIFACT_ID_MISMATCH"
+    REPLAY_PLAN_ID_MISMATCH = "REPLAY_PLAN_ID_MISMATCH"
+    OTHER = "OTHER"
+
+
+class ReplayArtifactFingerprintVerificationIssueSeverity(StrEnum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class ReplayArtifactFingerprintVerificationIssue(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    issue_id: str
+    kind: ReplayArtifactFingerprintVerificationIssueKind
+    severity: ReplayArtifactFingerprintVerificationIssueSeverity
+    message: str
+    expected_value: str | None = None
+    observed_value: str | None = None
+
+    @field_validator("issue_id", "message")
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("expected_value", "observed_value")
+    @classmethod
+    def _validate_optional_value_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "value")
+
+
+class ReplayArtifactFingerprintVerification(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    verification_id: str
+    fingerprint_id: str
+    artifact_kind: ReplayArtifactKind | None = None
+    artifact_id: str | None = None
+    replay_plan_id: str | None = None
+    verified_at: datetime
+    status: ReplayArtifactFingerprintVerificationStatus
+    stored_sha256: str | None = None
+    recomputed_sha256: str | None = None
+    stored_canonical_payload: str | None = None
+    recomputed_canonical_payload: str | None = None
+    issues: tuple[ReplayArtifactFingerprintVerificationIssue, ...] = ()
+    notes: str | None = None
+
+    @field_validator("verification_id", "fingerprint_id")
+    @classmethod
+    def _validate_required_ids(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("artifact_id", "replay_plan_id")
+    @classmethod
+    def _validate_optional_id_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "field")
+
+    @field_validator("verified_at")
+    @classmethod
+    def _validate_verified_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("stored_sha256", "recomputed_sha256")
+    @classmethod
+    def _validate_optional_sha256_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("sha256 must be a 64-character lowercase hex string")
+        return value
+
+    @field_validator("stored_canonical_payload", "recomputed_canonical_payload")
+    @classmethod
+    def _validate_optional_payload_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("canonical_payload must not be empty or blank")
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"canonical_payload is not valid JSON: {e}") from e
+        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if canonical != value:
+            raise ValueError("canonical_payload must be compact sorted JSON")
+        _check_no_floats_in_json(parsed)
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes_field(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_status_rules(self) -> Self:
+        if self.status is ReplayArtifactFingerprintVerificationStatus.VALID:
+            _validate_verification_valid(self)
+        elif self.status is ReplayArtifactFingerprintVerificationStatus.MISMATCH:
+            _validate_verification_mismatch(self)
+        elif self.status is ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT:
+            _validate_verification_missing_fingerprint(self)
+        elif self.status is ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT:
+            _validate_verification_missing_artifact(self)
+        _validate_optional_sha_matches_payload(
+            "stored_sha256", self.stored_sha256, self.stored_canonical_payload
+        )
+        _validate_optional_sha_matches_payload(
+            "recomputed_sha256", self.recomputed_sha256, self.recomputed_canonical_payload
+        )
+        _validate_payloads_identity_for_verification(self)
+        issue_ids = [i.issue_id for i in self.issues]
+        if len(issue_ids) != len(set(issue_ids)):
+            raise ValueError("duplicate issue_id in issues")
+        return self
+
+
+def _validate_verification_valid(v: ReplayArtifactFingerprintVerification) -> None:
+    if v.artifact_kind is None:
+        raise ValueError("VALID status requires artifact_kind")
+    if v.artifact_id is None:
+        raise ValueError("VALID status requires artifact_id")
+    if v.stored_sha256 is None:
+        raise ValueError("VALID status requires stored_sha256")
+    if v.recomputed_sha256 is None:
+        raise ValueError("VALID status requires recomputed_sha256")
+    if v.stored_sha256 != v.recomputed_sha256:
+        raise ValueError("VALID status requires stored_sha256 == recomputed_sha256")
+    if v.stored_canonical_payload is None:
+        raise ValueError("VALID status requires stored_canonical_payload")
+    if v.recomputed_canonical_payload is None:
+        raise ValueError("VALID status requires recomputed_canonical_payload")
+    if v.stored_canonical_payload != v.recomputed_canonical_payload:
+        raise ValueError(
+            "VALID status requires stored_canonical_payload == recomputed_canonical_payload"
+        )
+    if v.issues:
+        raise ValueError("VALID status requires no issues")
+
+
+def _validate_verification_mismatch(v: ReplayArtifactFingerprintVerification) -> None:
+    if v.artifact_kind is None:
+        raise ValueError("MISMATCH status requires artifact_kind")
+    if v.artifact_id is None:
+        raise ValueError("MISMATCH status requires artifact_id")
+    if v.stored_sha256 is None:
+        raise ValueError("MISMATCH status requires stored_sha256")
+    if v.recomputed_sha256 is None:
+        raise ValueError("MISMATCH status requires recomputed_sha256")
+    if not v.issues:
+        raise ValueError("MISMATCH status requires at least one issue")
+
+
+def _validate_verification_missing_fingerprint(
+    v: ReplayArtifactFingerprintVerification,
+) -> None:
+    if v.stored_sha256 is not None:
+        raise ValueError("MISSING_FINGERPRINT status requires stored_sha256 to be None")
+    if v.recomputed_sha256 is not None:
+        raise ValueError("MISSING_FINGERPRINT status requires recomputed_sha256 to be None")
+    if not any(
+        i.kind is ReplayArtifactFingerprintVerificationIssueKind.FINGERPRINT_NOT_FOUND
+        for i in v.issues
+    ):
+        raise ValueError(
+            "MISSING_FINGERPRINT status requires a FINGERPRINT_NOT_FOUND issue"
+        )
+
+
+def _validate_verification_missing_artifact(v: ReplayArtifactFingerprintVerification) -> None:
+    if v.stored_sha256 is None:
+        raise ValueError("MISSING_ARTIFACT status requires stored_sha256")
+    if v.recomputed_sha256 is not None:
+        raise ValueError("MISSING_ARTIFACT status requires recomputed_sha256 to be None")
+    if not any(
+        i.kind is ReplayArtifactFingerprintVerificationIssueKind.ARTIFACT_NOT_FOUND
+        for i in v.issues
+    ):
+        raise ValueError("MISSING_ARTIFACT status requires an ARTIFACT_NOT_FOUND issue")
+
+
+def _validate_optional_sha_matches_payload(
+    field_name: str,
+    sha256: str | None,
+    payload: str | None,
+) -> None:
+    if sha256 is not None and payload is not None:
+        expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        if sha256 != expected:
+            raise ValueError(
+                f"{field_name} does not match sha256 of its canonical payload"
+            )
+
+
+def _parse_verification_payload(payload: str) -> dict[str, object]:
+    parsed = json.loads(payload)
+    if not isinstance(parsed, dict):
+        raise ValueError("canonical_payload must be a JSON object")
+    return parsed
+
+
+def _validate_verification_payload_identity(
+    artifact_kind: ReplayArtifactKind,
+    artifact_id: str,
+    replay_plan_id: str | None,
+    payload: str,
+    field_name: str,
+) -> None:
+    parsed = _parse_verification_payload(payload)
+    if "artifact_kind" not in parsed:
+        raise ValueError(f"{field_name} must have top-level 'artifact_kind'")
+    if parsed["artifact_kind"] != artifact_kind.value:
+        raise ValueError(f"{field_name} artifact_kind does not match self.artifact_kind")
+    if "artifact" not in parsed:
+        raise ValueError(f"{field_name} must have top-level 'artifact'")
+    artifact = parsed["artifact"]
+    if not isinstance(artifact, dict):
+        raise ValueError(f"{field_name} 'artifact' must be a JSON object")
+    id_field = _ARTIFACT_ID_FIELD[artifact_kind]
+    if id_field not in artifact:
+        raise ValueError(f"{field_name} artifact must have '{id_field}'")
+    if artifact[id_field] != artifact_id:
+        raise ValueError(f"{field_name} artifact.{id_field} does not match artifact_id")
+    if replay_plan_id is not None:
+        _validate_plan_id_in_payload(artifact_kind, artifact, replay_plan_id)
+
+
+def _validate_payloads_identity_for_verification(
+    v: ReplayArtifactFingerprintVerification,
+) -> None:
+    kind = v.artifact_kind
+    aid = v.artifact_id
+    if kind is None or aid is None:
+        return
+    plan_id = v.replay_plan_id
+    if v.stored_canonical_payload is not None:
+        _validate_verification_payload_identity(
+            kind, aid, plan_id, v.stored_canonical_payload, "stored_canonical_payload"
+        )
+    if v.recomputed_canonical_payload is not None:
+        _validate_verification_payload_identity(
+            kind, aid, plan_id, v.recomputed_canonical_payload, "recomputed_canonical_payload"
+        )

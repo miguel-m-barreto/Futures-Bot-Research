@@ -463,3 +463,90 @@ def test_replay_artifact_fingerprint_modules_do_not_import_execution_types() -> 
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_replay_artifact_fingerprint_verification_source_does_not_import_forbidden_deps() -> None:
+    source = (ROOT / "src/futures_bot/replay/integrity.py").read_text(encoding="utf-8")
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "open(",
+        "write_text",
+        "read_text",
+    )
+    for name in forbidden:
+        assert name not in source, f"found {name!r} in integrity.py"
+
+
+def test_replay_artifact_fingerprint_verification_test_files_do_not_import_forbidden_deps() -> None:
+    verification_test_files = (
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_verification_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_artifact_fingerprint_verification_store.py",
+        ROOT / "tests/unit/test_local_replay_artifact_fingerprint_verifier.py",
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_verification_flow.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in verification_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_artifact_fingerprint_verification_modules_do_not_import_execution_types() -> None:
+    verification_paths = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_verification_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_artifact_fingerprint_verification_store.py",
+        ROOT / "tests/unit/test_local_replay_artifact_fingerprint_verifier.py",
+        ROOT / "tests/unit/test_replay_artifact_fingerprint_verification_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in verification_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

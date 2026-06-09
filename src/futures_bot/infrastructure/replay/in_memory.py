@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from futures_bot.domain.replay import (
     ReplayArtifactFingerprint,
+    ReplayArtifactFingerprintVerification,
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
@@ -370,5 +371,80 @@ class InMemoryReplayArtifactFingerprintStore:
             sorted(
                 self._fingerprints.values(),
                 key=lambda f: (f.generated_at, f.fingerprint_id),
+            )
+        )
+
+
+class InMemoryReplayArtifactFingerprintVerificationStore:
+    """In-memory store for replay artifact fingerprint verifications.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._verifications: dict[str, ReplayArtifactFingerprintVerification] = {}
+
+    def save(self, verification: ReplayArtifactFingerprintVerification) -> None:
+        """Persist verification; idempotent if identical, raises on conflict."""
+        revalidated = ReplayArtifactFingerprintVerification.model_validate(
+            verification.model_dump()
+        )
+        existing = self._verifications.get(revalidated.verification_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(
+                    f"verification_id conflict for {revalidated.verification_id!r}"
+                )
+            return
+        self._verifications[revalidated.verification_id] = revalidated
+
+    def load(
+        self, verification_id: str
+    ) -> ReplayArtifactFingerprintVerification | None:
+        """Return verification by verification_id, or None."""
+        return self._verifications.get(verification_id)
+
+    def list_for_fingerprint(
+        self, fingerprint_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications for fingerprint_id in deterministic order."""
+        return tuple(
+            sorted(
+                (v for v in self._verifications.values() if v.fingerprint_id == fingerprint_id),
+                key=lambda v: (v.verified_at, v.verification_id),
+            )
+        )
+
+    def list_for_artifact(
+        self, artifact_kind: ReplayArtifactKind, artifact_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications for (artifact_kind, artifact_id) in deterministic order."""
+        return tuple(
+            sorted(
+                (
+                    v for v in self._verifications.values()
+                    if v.artifact_kind is artifact_kind and v.artifact_id == artifact_id
+                ),
+                key=lambda v: (v.verified_at, v.verification_id),
+            )
+        )
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return verifications where replay_plan_id matches, in deterministic order."""
+        return tuple(
+            sorted(
+                (v for v in self._verifications.values() if v.replay_plan_id == replay_plan_id),
+                key=lambda v: (v.verified_at, v.verification_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprintVerification, ...]:
+        """Return all verifications sorted by verified_at then verification_id."""
+        return tuple(
+            sorted(
+                self._verifications.values(),
+                key=lambda v: (v.verified_at, v.verification_id),
             )
         )
