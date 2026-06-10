@@ -5,6 +5,7 @@ from typing import Protocol
 from futures_bot.domain.replay import (
     ReplayArtifactFingerprint,
     ReplayArtifactFingerprintVerification,
+    ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
@@ -202,4 +203,28 @@ class ReplayArtifactFingerprintVerificationStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayArtifactFingerprintVerification, ...]:
         """Return all verifications in deterministic order."""
+        ...
+
+
+class ReplayArtifactFingerprintVerificationBatchReportStorePort(Protocol):
+    """Persistence abstraction for replay artifact fingerprint verification batch reports."""
+
+    def save(self, report: ReplayArtifactFingerprintVerificationBatchReport) -> None:
+        """Persist report; idempotent if identical, raises on conflict."""
+        ...
+
+    def load(
+        self, report_id: str
+    ) -> ReplayArtifactFingerprintVerificationBatchReport | None:
+        """Return report by report_id, or None."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        """Return reports where replay_plan_id matches, in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        """Return all reports in deterministic order."""
         ...

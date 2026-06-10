@@ -7,6 +7,7 @@ from __future__ import annotations
 from futures_bot.domain.replay import (
     ReplayArtifactFingerprint,
     ReplayArtifactFingerprintVerification,
+    ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
@@ -446,5 +447,55 @@ class InMemoryReplayArtifactFingerprintVerificationStore:
             sorted(
                 self._verifications.values(),
                 key=lambda v: (v.verified_at, v.verification_id),
+            )
+        )
+
+
+class InMemoryReplayArtifactFingerprintVerificationBatchReportStore:
+    """In-memory store for replay artifact fingerprint verification batch reports.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._batch_reports: dict[str, ReplayArtifactFingerprintVerificationBatchReport] = {}
+
+    def save(self, report: ReplayArtifactFingerprintVerificationBatchReport) -> None:
+        """Persist report; idempotent if identical, raises on conflict."""
+        revalidated = ReplayArtifactFingerprintVerificationBatchReport.model_validate(
+            report.model_dump()
+        )
+        existing = self._batch_reports.get(revalidated.report_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(
+                    f"report_id conflict for {revalidated.report_id!r}"
+                )
+            return
+        self._batch_reports[revalidated.report_id] = revalidated
+
+    def load(
+        self, report_id: str
+    ) -> ReplayArtifactFingerprintVerificationBatchReport | None:
+        """Return report by report_id, or None."""
+        return self._batch_reports.get(report_id)
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        """Return reports where replay_plan_id matches, in deterministic order."""
+        return tuple(
+            sorted(
+                (r for r in self._batch_reports.values() if r.replay_plan_id == replay_plan_id),
+                key=lambda r: (r.generated_at, r.report_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        """Return all reports sorted by generated_at then report_id."""
+        return tuple(
+            sorted(
+                self._batch_reports.values(),
+                key=lambda r: (r.generated_at, r.report_id),
             )
         )

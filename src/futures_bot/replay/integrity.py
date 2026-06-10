@@ -13,6 +13,11 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprint,
     ReplayArtifactFingerprintStatus,
     ReplayArtifactFingerprintVerification,
+    ReplayArtifactFingerprintVerificationBatchItem,
+    ReplayArtifactFingerprintVerificationBatchReport,
+    ReplayArtifactFingerprintVerificationBatchReportStatus,
+    ReplayArtifactFingerprintVerificationBatchScopeKind,
+    ReplayArtifactFingerprintVerificationBatchSummary,
     ReplayArtifactFingerprintVerificationIssue,
     ReplayArtifactFingerprintVerificationIssueKind,
     ReplayArtifactFingerprintVerificationIssueSeverity,
@@ -22,6 +27,7 @@ from futures_bot.domain.replay import (
 )
 from futures_bot.ports.replay import (
     ReplayArtifactFingerprintStorePort,
+    ReplayArtifactFingerprintVerificationBatchReportStorePort,
     ReplayArtifactFingerprintVerificationStorePort,
     ReplayTimelineCoverageDiffStorePort,
     ReplayTimelineCoverageReportStorePort,
@@ -364,3 +370,149 @@ class LocalReplayArtifactFingerprintVerifier:
         self, replay_plan_id: str
     ) -> tuple[ReplayArtifactFingerprintVerification, ...]:
         return self._verification_store.list_for_replay_plan(replay_plan_id)
+
+
+def _infer_replay_plan_id_from_items(
+    items: list[ReplayArtifactFingerprintVerificationBatchItem],
+) -> str | None:
+    if not items:
+        return None
+    plan_ids = {i.replay_plan_id for i in items}
+    if len(plan_ids) == 1:
+        (plan_id,) = plan_ids
+        return plan_id
+    return None
+
+
+def _build_batch_summary(
+    items: list[ReplayArtifactFingerprintVerificationBatchItem],
+) -> ReplayArtifactFingerprintVerificationBatchSummary:
+    total = len(items)
+    count_by_status: dict[ReplayArtifactFingerprintVerificationStatus, int] = {}
+    for item in items:
+        vs = item.verification_status
+        count_by_status[vs] = count_by_status.get(vs, 0) + 1
+    total_issues = sum(item.issue_count for item in items)
+    valid_count = count_by_status.get(ReplayArtifactFingerprintVerificationStatus.VALID, 0)
+    mismatch_count = count_by_status.get(
+        ReplayArtifactFingerprintVerificationStatus.MISMATCH, 0
+    )
+    missing_fp = count_by_status.get(
+        ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT, 0
+    )
+    missing_art = count_by_status.get(
+        ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT, 0
+    )
+    return ReplayArtifactFingerprintVerificationBatchSummary(
+        total_fingerprints=total,
+        count_by_status=count_by_status,
+        total_issues=total_issues,
+        all_valid=(total > 0 and valid_count == total),
+        has_mismatches=mismatch_count > 0,
+        has_missing=(missing_fp + missing_art) > 0,
+    )
+
+
+class LocalReplayArtifactFingerprintBatchVerifier:
+    """Metadata-only batch verifier for replay artifact fingerprints.
+
+    No replay execution. No file IO. No DB. No Kafka.
+    """
+
+    def __init__(
+        self,
+        *,
+        verifier: LocalReplayArtifactFingerprintVerifier,
+        fingerprint_store: ReplayArtifactFingerprintStorePort,
+        batch_report_store: ReplayArtifactFingerprintVerificationBatchReportStorePort,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._verifier = verifier
+        self._fingerprint_store = fingerprint_store
+        self._batch_report_store = batch_report_store
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
+
+    def _build_report(
+        self,
+        report_id: str,
+        fingerprint_ids: tuple[str, ...],
+        scope_kind: ReplayArtifactFingerprintVerificationBatchScopeKind,
+        replay_plan_id: str | None,
+        notes: str | None,
+    ) -> ReplayArtifactFingerprintVerificationBatchReport:
+        now = self._now()
+        if len(fingerprint_ids) != len(set(fingerprint_ids)):
+            raise ValueError("duplicate fingerprint_ids in input")
+        items: list[ReplayArtifactFingerprintVerificationBatchItem] = []
+        for fp_id in fingerprint_ids:
+            ver_id = f"{report_id}:{fp_id}:verification"
+            item_id = f"{report_id}:{fp_id}:item"
+            verification = self._verifier.verify_fingerprint(ver_id, fp_id)
+            item = ReplayArtifactFingerprintVerificationBatchItem(
+                item_id=item_id,
+                fingerprint_id=fp_id,
+                verification_id=ver_id,
+                verification_status=verification.status,
+                artifact_kind=verification.artifact_kind,
+                artifact_id=verification.artifact_id,
+                replay_plan_id=verification.replay_plan_id,
+                issue_count=len(verification.issues),
+            )
+            items.append(item)
+        effective_plan_id = replay_plan_id
+        if effective_plan_id is None:
+            effective_plan_id = _infer_replay_plan_id_from_items(items)
+        summary = _build_batch_summary(items)
+        report = ReplayArtifactFingerprintVerificationBatchReport(
+            report_id=report_id,
+            scope_kind=scope_kind,
+            replay_plan_id=effective_plan_id,
+            generated_at=now,
+            status=ReplayArtifactFingerprintVerificationBatchReportStatus.GENERATED,
+            items=tuple(items),
+            summary=summary,
+            requested_fingerprint_ids=fingerprint_ids,
+            notes=notes,
+        )
+        self._batch_report_store.save(report)
+        return report
+
+    def verify_fingerprints(
+        self,
+        report_id: str,
+        fingerprint_ids: tuple[str, ...],
+        notes: str | None = None,
+    ) -> ReplayArtifactFingerprintVerificationBatchReport:
+        return self._build_report(
+            report_id,
+            fingerprint_ids,
+            ReplayArtifactFingerprintVerificationBatchScopeKind.EXPLICIT_FINGERPRINT_SET,
+            None,
+            notes,
+        )
+
+    def verify_replay_plan(
+        self,
+        report_id: str,
+        replay_plan_id: str,
+        notes: str | None = None,
+    ) -> ReplayArtifactFingerprintVerificationBatchReport:
+        fingerprints = self._fingerprint_store.list_for_replay_plan(replay_plan_id)
+        fp_ids = tuple(fp.fingerprint_id for fp in fingerprints)
+        return self._build_report(
+            report_id,
+            fp_ids,
+            ReplayArtifactFingerprintVerificationBatchScopeKind.REPLAY_PLAN,
+            replay_plan_id,
+            notes,
+        )
+
+    def load_report(
+        self, report_id: str
+    ) -> ReplayArtifactFingerprintVerificationBatchReport | None:
+        return self._batch_report_store.load(report_id)
+
+    def reports_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        return self._batch_report_store.list_for_replay_plan(replay_plan_id)

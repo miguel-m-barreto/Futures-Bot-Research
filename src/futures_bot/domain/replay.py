@@ -1533,3 +1533,188 @@ def _validate_payloads_identity_for_verification(
         _validate_verification_payload_identity(
             kind, aid, plan_id, v.recomputed_canonical_payload, "recomputed_canonical_payload"
         )
+
+
+class ReplayArtifactFingerprintVerificationBatchReportStatus(StrEnum):
+    GENERATED = "GENERATED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayArtifactFingerprintVerificationBatchScopeKind(StrEnum):
+    EXPLICIT_FINGERPRINT_SET = "EXPLICIT_FINGERPRINT_SET"
+    REPLAY_PLAN = "REPLAY_PLAN"
+    ARTIFACT_SET = "ARTIFACT_SET"
+    OTHER = "OTHER"
+
+
+def _validate_strict_int(value: object, field_name: str) -> object:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be a strict int")
+    return value
+
+
+class ReplayArtifactFingerprintVerificationBatchItem(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    item_id: str
+    fingerprint_id: str
+    verification_id: str
+    verification_status: ReplayArtifactFingerprintVerificationStatus
+    artifact_kind: ReplayArtifactKind | None = None
+    artifact_id: str | None = None
+    replay_plan_id: str | None = None
+    issue_count: int = 0
+
+    @field_validator("issue_count", mode="before")
+    @classmethod
+    def _validate_issue_count_type(cls, v: object) -> object:
+        return _validate_strict_int(v, "issue_count")
+
+    @model_validator(mode="after")
+    def _validate_ids(self) -> Self:
+        if not self.item_id:
+            raise ValueError("item_id must be non-empty")
+        if not self.fingerprint_id:
+            raise ValueError("fingerprint_id must be non-empty")
+        if not self.verification_id:
+            raise ValueError("verification_id must be non-empty")
+        if self.artifact_id is not None and not self.artifact_id:
+            raise ValueError("artifact_id must be non-empty if provided")
+        if self.replay_plan_id is not None and not self.replay_plan_id:
+            raise ValueError("replay_plan_id must be non-empty if provided")
+        if self.issue_count < 0:
+            raise ValueError("issue_count must be >= 0")
+        return self
+
+
+class ReplayArtifactFingerprintVerificationBatchSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    total_fingerprints: int
+    count_by_status: Mapping[ReplayArtifactFingerprintVerificationStatus, int]
+    total_issues: int
+    all_valid: bool
+    has_mismatches: bool
+    has_missing: bool
+
+    @field_validator("total_fingerprints", "total_issues", mode="before")
+    @classmethod
+    def _reject_non_int_counts(cls, v: object) -> object:
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError("count fields must be a strict int")
+        return v
+
+    @field_validator("count_by_status", mode="before")
+    @classmethod
+    def _validate_count_by_status_values(cls, v: object) -> object:
+        if isinstance(v, Mapping):
+            for val in v.values():
+                if isinstance(val, bool) or not isinstance(val, int):
+                    raise ValueError("count_by_status values must be a strict int")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if self.total_fingerprints < 0:
+            raise ValueError("total_fingerprints must be >= 0")
+        if self.total_issues < 0:
+            raise ValueError("total_issues must be >= 0")
+        for count in self.count_by_status.values():
+            if count < 0:
+                raise ValueError("count_by_status values must be >= 0")
+        if self.total_fingerprints == 0 and self.count_by_status:
+            raise ValueError("count_by_status must be empty when total_fingerprints == 0")
+        count_sum = sum(self.count_by_status.values())
+        if count_sum != self.total_fingerprints:
+            raise ValueError("sum of count_by_status values must equal total_fingerprints")
+        valid_count = self.count_by_status.get(
+            ReplayArtifactFingerprintVerificationStatus.VALID, 0
+        )
+        expected_all_valid = (
+            self.total_fingerprints > 0 and valid_count == self.total_fingerprints
+        )
+        if self.all_valid != expected_all_valid:
+            raise ValueError("all_valid is inconsistent with count_by_status")
+        mismatch_count = self.count_by_status.get(
+            ReplayArtifactFingerprintVerificationStatus.MISMATCH, 0
+        )
+        if self.has_mismatches != (mismatch_count > 0):
+            raise ValueError("has_mismatches is inconsistent with count_by_status")
+        missing_fp = self.count_by_status.get(
+            ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT, 0
+        )
+        missing_art = self.count_by_status.get(
+            ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT, 0
+        )
+        if self.has_missing != ((missing_fp + missing_art) > 0):
+            raise ValueError("has_missing is inconsistent with count_by_status")
+        return self
+
+
+class ReplayArtifactFingerprintVerificationBatchReport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    report_id: str
+    scope_kind: ReplayArtifactFingerprintVerificationBatchScopeKind
+    replay_plan_id: str | None = None
+    generated_at: datetime
+    status: ReplayArtifactFingerprintVerificationBatchReportStatus
+    summary: ReplayArtifactFingerprintVerificationBatchSummary
+    items: tuple[ReplayArtifactFingerprintVerificationBatchItem, ...] = ()
+    requested_fingerprint_ids: tuple[str, ...] = ()
+    notes: str | None = None
+
+    @field_validator("generated_at", mode="after")
+    @classmethod
+    def _validate_generated_at(cls, v: datetime) -> datetime:
+        return ensure_aware_utc(v)
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> Self:
+        if not self.report_id:
+            raise ValueError("report_id must be non-empty")
+        if self.replay_plan_id is not None and not self.replay_plan_id:
+            raise ValueError("replay_plan_id must be non-empty if provided")
+        if self.notes is not None and (not self.notes or self.notes != self.notes.strip()):
+            raise ValueError("notes must be non-empty without leading/trailing whitespace")
+        if any(not fp_id for fp_id in self.requested_fingerprint_ids):
+            raise ValueError("requested_fingerprint_ids must not contain empty strings")
+        rfp_ids = list(self.requested_fingerprint_ids)
+        if len(rfp_ids) != len(set(rfp_ids)):
+            raise ValueError("duplicate fingerprint_id in requested_fingerprint_ids")
+        item_ids = [i.item_id for i in self.items]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("duplicate item_id in items")
+        ver_ids = [i.verification_id for i in self.items]
+        if len(ver_ids) != len(set(ver_ids)):
+            raise ValueError("duplicate verification_id in items")
+        item_fp_ids = [i.fingerprint_id for i in self.items]
+        if len(item_fp_ids) != len(set(item_fp_ids)):
+            raise ValueError("duplicate fingerprint_id in items")
+        if (
+            self.scope_kind is ReplayArtifactFingerprintVerificationBatchScopeKind.REPLAY_PLAN
+            and self.replay_plan_id is None
+        ):
+            raise ValueError("REPLAY_PLAN scope requires replay_plan_id")
+        if self.requested_fingerprint_ids and tuple(item_fp_ids) != self.requested_fingerprint_ids:
+            raise ValueError(
+                "items fingerprint_ids must exactly match requested_fingerprint_ids"
+            )
+        _validate_batch_summary_matches_items(self)
+        return self
+
+
+def _validate_batch_summary_matches_items(
+    r: ReplayArtifactFingerprintVerificationBatchReport,
+) -> None:
+    items = r.items
+    s = r.summary
+    if len(items) != s.total_fingerprints:
+        raise ValueError("summary.total_fingerprints does not match len(items)")
+    actual_counts: dict[ReplayArtifactFingerprintVerificationStatus, int] = {}
+    for item in items:
+        vs = item.verification_status
+        actual_counts[vs] = actual_counts.get(vs, 0) + 1
+    expected = {k: v for k, v in s.count_by_status.items() if v > 0}
+    if expected != actual_counts:
+        raise ValueError("summary.count_by_status does not match items")
+    actual_total_issues = sum(item.issue_count for item in items)
+    if actual_total_issues != s.total_issues:
+        raise ValueError("summary.total_issues does not match sum of item.issue_count")
