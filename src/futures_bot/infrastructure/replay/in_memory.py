@@ -11,6 +11,7 @@ from futures_bot.domain.replay import (
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
+    ReplayReadinessReport,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
@@ -497,5 +498,49 @@ class InMemoryReplayArtifactFingerprintVerificationBatchReportStore:
             sorted(
                 self._batch_reports.values(),
                 key=lambda r: (r.generated_at, r.report_id),
+            )
+        )
+
+
+class InMemoryReplayReadinessReportStore:
+    """In-memory store for replay readiness reports.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._reports: dict[str, ReplayReadinessReport] = {}
+
+    def save(self, report: ReplayReadinessReport) -> None:
+        """Persist report; idempotent if identical, raises on conflict."""
+        revalidated = ReplayReadinessReport.model_validate(report.model_dump())
+        existing = self._reports.get(revalidated.report_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(f"report_id conflict for {revalidated.report_id!r}")
+            return
+        self._reports[revalidated.report_id] = revalidated
+
+    def load(self, report_id: str) -> ReplayReadinessReport | None:
+        """Return report by report_id, or None."""
+        return self._reports.get(report_id)
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayReadinessReport, ...]:
+        """Return reports where replay_plan_id matches, in deterministic order."""
+        return tuple(
+            sorted(
+                (r for r in self._reports.values() if r.replay_plan_id == replay_plan_id),
+                key=lambda r: (r.checked_at, r.report_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayReadinessReport, ...]:
+        """Return all reports sorted by checked_at then report_id."""
+        return tuple(
+            sorted(
+                self._reports.values(),
+                key=lambda r: (r.checked_at, r.report_id),
             )
         )

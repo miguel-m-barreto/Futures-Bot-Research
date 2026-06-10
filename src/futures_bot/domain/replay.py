@@ -1718,3 +1718,195 @@ def _validate_batch_summary_matches_items(
     actual_total_issues = sum(item.issue_count for item in items)
     if actual_total_issues != s.total_issues:
         raise ValueError("summary.total_issues does not match sum of item.issue_count")
+
+
+# ---------------------------------------------------------------------------
+# Replay readiness report
+# ---------------------------------------------------------------------------
+
+
+class ReplayReadinessStatus(StrEnum):
+    READY = "READY"
+    WARNING = "WARNING"
+    BLOCKED = "BLOCKED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayReadinessIssueSeverity(StrEnum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class ReplayReadinessIssueKind(StrEnum):
+    NO_FINGERPRINTS = "NO_FINGERPRINTS"
+    NO_VERIFICATION_BATCH_REPORT = "NO_VERIFICATION_BATCH_REPORT"
+    LATEST_BATCH_REPORT_INVALIDATED = "LATEST_BATCH_REPORT_INVALIDATED"
+    BATCH_HAS_MISMATCHES = "BATCH_HAS_MISMATCHES"
+    BATCH_HAS_MISSING = "BATCH_HAS_MISSING"
+    BATCH_NOT_ALL_VALID = "BATCH_NOT_ALL_VALID"
+    FINGERPRINT_COUNT_MISMATCH = "FINGERPRINT_COUNT_MISMATCH"
+    COVERAGE_REPORT_HAS_ERRORS = "COVERAGE_REPORT_HAS_ERRORS"
+    COVERAGE_REPORT_MISSING = "COVERAGE_REPORT_MISSING"
+    OTHER = "OTHER"
+
+
+class ReplayReadinessIssue(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    issue_id: str
+    kind: ReplayReadinessIssueKind
+    severity: ReplayReadinessIssueSeverity
+    message: str
+    artifact_id: str | None = None
+    fingerprint_id: str | None = None
+    batch_report_id: str | None = None
+
+    @field_validator("issue_id", "message")
+    @classmethod
+    def _validate_required_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("artifact_id", "fingerprint_id", "batch_report_id")
+    @classmethod
+    def _validate_optional_ref_fields(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "field")
+
+
+def _validate_strict_optional_int(value: object, field_name: str) -> object:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be a strict int")
+    return value
+
+
+class ReplayReadinessSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    total_fingerprints: int
+    latest_batch_report_id: str | None = None
+    latest_batch_total_fingerprints: int | None = None
+    latest_batch_total_issues: int | None = None
+    latest_batch_all_valid: bool | None = None
+    blocking_issue_count: int
+    warning_issue_count: int
+    info_issue_count: int
+
+    @field_validator(
+        "total_fingerprints",
+        "blocking_issue_count",
+        "warning_issue_count",
+        "info_issue_count",
+        mode="before",
+    )
+    @classmethod
+    def _validate_required_int_fields(cls, v: object) -> object:
+        return _validate_strict_int(v, "count field")
+
+    @field_validator(
+        "latest_batch_total_fingerprints",
+        "latest_batch_total_issues",
+        mode="before",
+    )
+    @classmethod
+    def _validate_optional_int_fields(cls, v: object) -> object:
+        return _validate_strict_optional_int(v, "optional count field")
+
+    @field_validator("latest_batch_report_id")
+    @classmethod
+    def _validate_latest_batch_report_id(cls, v: str | None) -> str | None:
+        return _validate_optional_text(v, "latest_batch_report_id")
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if self.total_fingerprints < 0:
+            raise ValueError("total_fingerprints must be >= 0")
+        if self.blocking_issue_count < 0:
+            raise ValueError("blocking_issue_count must be >= 0")
+        if self.warning_issue_count < 0:
+            raise ValueError("warning_issue_count must be >= 0")
+        if self.info_issue_count < 0:
+            raise ValueError("info_issue_count must be >= 0")
+        if self.latest_batch_total_fingerprints is not None and (
+            self.latest_batch_total_fingerprints < 0
+        ):
+            raise ValueError("latest_batch_total_fingerprints must be >= 0")
+        if self.latest_batch_total_issues is not None and self.latest_batch_total_issues < 0:
+            raise ValueError("latest_batch_total_issues must be >= 0")
+        return self
+
+
+def _validate_readiness_status(
+    r: ReplayReadinessReport,
+    error_count: int,
+    warn_count: int,
+) -> None:
+    s = r.status
+    if s is ReplayReadinessStatus.READY:
+        if r.issues:
+            raise ValueError("READY status requires no issues")
+        if r.summary.total_fingerprints == 0:
+            raise ValueError("READY status requires total_fingerprints > 0")
+        if r.summary.latest_batch_report_id is None:
+            raise ValueError("READY status requires latest_batch_report_id")
+        if r.summary.latest_batch_all_valid is not True:
+            raise ValueError("READY status requires latest_batch_all_valid is True")
+    elif s is ReplayReadinessStatus.WARNING:
+        if warn_count == 0:
+            raise ValueError("WARNING status requires at least one WARNING issue")
+        if error_count > 0:
+            raise ValueError("WARNING status requires no ERROR issues")
+    elif s is ReplayReadinessStatus.BLOCKED:
+        if error_count == 0:
+            raise ValueError("BLOCKED status requires at least one ERROR issue")
+
+
+class ReplayReadinessReport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    report_id: str
+    replay_plan_id: str
+    checked_at: datetime
+    status: ReplayReadinessStatus
+    summary: ReplayReadinessSummary
+    issues: tuple[ReplayReadinessIssue, ...] = ()
+    notes: str | None = None
+
+    @field_validator("report_id", "replay_plan_id")
+    @classmethod
+    def _validate_id_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("checked_at")
+    @classmethod
+    def _validate_checked_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "notes")
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> Self:
+        issue_ids = [i.issue_id for i in self.issues]
+        if len(issue_ids) != len(set(issue_ids)):
+            raise ValueError("duplicate issue_id in issues")
+        error_count = sum(
+            1 for i in self.issues if i.severity is ReplayReadinessIssueSeverity.ERROR
+        )
+        warn_count = sum(
+            1 for i in self.issues if i.severity is ReplayReadinessIssueSeverity.WARNING
+        )
+        info_count = sum(
+            1 for i in self.issues if i.severity is ReplayReadinessIssueSeverity.INFO
+        )
+        if self.summary.blocking_issue_count != error_count:
+            raise ValueError("summary.blocking_issue_count does not match ERROR issue count")
+        if self.summary.warning_issue_count != warn_count:
+            raise ValueError("summary.warning_issue_count does not match WARNING issue count")
+        if self.summary.info_issue_count != info_count:
+            raise ValueError("summary.info_issue_count does not match INFO issue count")
+        _validate_readiness_status(self, error_count, warn_count)
+        return self

@@ -24,11 +24,19 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerificationStatus,
     ReplayArtifactHashAlgorithm,
     ReplayArtifactKind,
+    ReplayReadinessIssue,
+    ReplayReadinessIssueKind,
+    ReplayReadinessIssueSeverity,
+    ReplayReadinessReport,
+    ReplayReadinessStatus,
+    ReplayReadinessSummary,
+    ReplayTimelineCoverageIssueSeverity,
 )
 from futures_bot.ports.replay import (
     ReplayArtifactFingerprintStorePort,
     ReplayArtifactFingerprintVerificationBatchReportStorePort,
     ReplayArtifactFingerprintVerificationStorePort,
+    ReplayReadinessReportStorePort,
     ReplayTimelineCoverageDiffStorePort,
     ReplayTimelineCoverageReportStorePort,
     ReplayTimelineStorePort,
@@ -516,3 +524,216 @@ class LocalReplayArtifactFingerprintBatchVerifier:
         self, replay_plan_id: str
     ) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
         return self._batch_report_store.list_for_replay_plan(replay_plan_id)
+
+
+def _latest_batch_report(
+    reports: tuple[ReplayArtifactFingerprintVerificationBatchReport, ...],
+) -> ReplayArtifactFingerprintVerificationBatchReport | None:
+    if not reports:
+        return None
+    return max(reports, key=lambda r: (r.generated_at, r.report_id))
+
+
+def _make_readiness_issue(
+    issue_id: str,
+    kind: ReplayReadinessIssueKind,
+    severity: ReplayReadinessIssueSeverity,
+    message: str,
+    batch_report_id: str | None = None,
+) -> ReplayReadinessIssue:
+    return ReplayReadinessIssue(
+        issue_id=issue_id,
+        kind=kind,
+        severity=severity,
+        message=message,
+        batch_report_id=batch_report_id,
+    )
+
+
+def _build_readiness_summary(
+    fingerprint_count: int,
+    latest: ReplayArtifactFingerprintVerificationBatchReport | None,
+    issues: list[ReplayReadinessIssue],
+) -> ReplayReadinessSummary:
+    blocking = sum(1 for i in issues if i.severity is ReplayReadinessIssueSeverity.ERROR)
+    warning = sum(1 for i in issues if i.severity is ReplayReadinessIssueSeverity.WARNING)
+    info = sum(1 for i in issues if i.severity is ReplayReadinessIssueSeverity.INFO)
+    return ReplayReadinessSummary(
+        total_fingerprints=fingerprint_count,
+        latest_batch_report_id=latest.report_id if latest is not None else None,
+        latest_batch_total_fingerprints=(
+            latest.summary.total_fingerprints if latest is not None else None
+        ),
+        latest_batch_total_issues=(
+            latest.summary.total_issues if latest is not None else None
+        ),
+        latest_batch_all_valid=latest.summary.all_valid if latest is not None else None,
+        blocking_issue_count=blocking,
+        warning_issue_count=warning,
+        info_issue_count=info,
+    )
+
+
+def _determine_readiness_status(
+    issues: list[ReplayReadinessIssue],
+    fingerprint_count: int,
+    latest: ReplayArtifactFingerprintVerificationBatchReport | None,
+) -> ReplayReadinessStatus:
+    has_errors = any(i.severity is ReplayReadinessIssueSeverity.ERROR for i in issues)
+    has_warnings = any(i.severity is ReplayReadinessIssueSeverity.WARNING for i in issues)
+    if has_errors:
+        return ReplayReadinessStatus.BLOCKED
+    if has_warnings:
+        return ReplayReadinessStatus.WARNING
+    if fingerprint_count > 0 and latest is not None and latest.summary.all_valid:
+        return ReplayReadinessStatus.READY
+    return ReplayReadinessStatus.BLOCKED
+
+
+def _collect_readiness_issues(
+    fingerprints: tuple[ReplayArtifactFingerprint, ...],
+    batch_reports: tuple[ReplayArtifactFingerprintVerificationBatchReport, ...],
+    latest: ReplayArtifactFingerprintVerificationBatchReport | None,
+    coverage_reports: tuple | None,
+) -> list[ReplayReadinessIssue]:
+    issues: list[ReplayReadinessIssue] = []
+    if not fingerprints:
+        issues.append(_make_readiness_issue(
+            "readiness-no-fingerprints",
+            ReplayReadinessIssueKind.NO_FINGERPRINTS,
+            ReplayReadinessIssueSeverity.ERROR,
+            "no fingerprints found for replay plan",
+        ))
+        return issues
+    if not batch_reports:
+        issues.append(_make_readiness_issue(
+            "readiness-no-batch-report",
+            ReplayReadinessIssueKind.NO_VERIFICATION_BATCH_REPORT,
+            ReplayReadinessIssueSeverity.ERROR,
+            "no verification batch report found for replay plan",
+        ))
+        return issues
+    assert latest is not None
+    batch_id = latest.report_id
+    if latest.status is ReplayArtifactFingerprintVerificationBatchReportStatus.INVALIDATED:
+        issues.append(_make_readiness_issue(
+            "readiness-batch-invalidated",
+            ReplayReadinessIssueKind.LATEST_BATCH_REPORT_INVALIDATED,
+            ReplayReadinessIssueSeverity.ERROR,
+            "latest verification batch report is invalidated",
+            batch_report_id=batch_id,
+        ))
+    if latest.summary.has_mismatches:
+        issues.append(_make_readiness_issue(
+            "readiness-batch-mismatches",
+            ReplayReadinessIssueKind.BATCH_HAS_MISMATCHES,
+            ReplayReadinessIssueSeverity.ERROR,
+            "latest batch report has fingerprint mismatches",
+            batch_report_id=batch_id,
+        ))
+    if latest.summary.has_missing:
+        issues.append(_make_readiness_issue(
+            "readiness-batch-missing",
+            ReplayReadinessIssueKind.BATCH_HAS_MISSING,
+            ReplayReadinessIssueSeverity.ERROR,
+            "latest batch report has missing fingerprints or artifacts",
+            batch_report_id=batch_id,
+        ))
+    if not latest.summary.all_valid and latest.summary.total_fingerprints > 0:
+        issues.append(_make_readiness_issue(
+            "readiness-batch-not-all-valid",
+            ReplayReadinessIssueKind.BATCH_NOT_ALL_VALID,
+            ReplayReadinessIssueSeverity.ERROR,
+            "latest batch report is not all-valid",
+            batch_report_id=batch_id,
+        ))
+    if latest.summary.total_fingerprints != len(fingerprints):
+        issues.append(_make_readiness_issue(
+            "readiness-fp-count-mismatch",
+            ReplayReadinessIssueKind.FINGERPRINT_COUNT_MISMATCH,
+            ReplayReadinessIssueSeverity.ERROR,
+            (
+                f"fingerprint count mismatch: "
+                f"{len(fingerprints)} stored vs "
+                f"{latest.summary.total_fingerprints} in latest batch"
+            ),
+            batch_report_id=batch_id,
+        ))
+    if coverage_reports is not None:
+        if not coverage_reports:
+            issues.append(_make_readiness_issue(
+                "readiness-coverage-missing",
+                ReplayReadinessIssueKind.COVERAGE_REPORT_MISSING,
+                ReplayReadinessIssueSeverity.WARNING,
+                "no coverage report found for replay plan",
+            ))
+        else:
+            latest_cov = max(coverage_reports, key=lambda r: (r.generated_at, r.report_id))
+            error_count = latest_cov.summary.issue_count_by_severity.get(
+                ReplayTimelineCoverageIssueSeverity.ERROR, 0
+            )
+            if error_count > 0:
+                issues.append(_make_readiness_issue(
+                    "readiness-coverage-errors",
+                    ReplayReadinessIssueKind.COVERAGE_REPORT_HAS_ERRORS,
+                    ReplayReadinessIssueSeverity.ERROR,
+                    "latest coverage report has ERROR issues",
+                ))
+    return issues
+
+
+class LocalReplayReadinessChecker:
+    """Metadata-only readiness checker for replay plans.
+
+    No replay execution. No file IO. No DB. No Kafka.
+    """
+
+    def __init__(
+        self,
+        *,
+        fingerprint_store: ReplayArtifactFingerprintStorePort,
+        batch_report_store: ReplayArtifactFingerprintVerificationBatchReportStorePort,
+        readiness_report_store: ReplayReadinessReportStorePort,
+        coverage_report_store: ReplayTimelineCoverageReportStorePort | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._fingerprint_store = fingerprint_store
+        self._batch_report_store = batch_report_store
+        self._readiness_report_store = readiness_report_store
+        self._coverage_report_store = coverage_report_store
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
+
+    def check_replay_plan(
+        self,
+        report_id: str,
+        replay_plan_id: str,
+        notes: str | None = None,
+    ) -> ReplayReadinessReport:
+        fingerprints = self._fingerprint_store.list_for_replay_plan(replay_plan_id)
+        batch_reports = self._batch_report_store.list_for_replay_plan(replay_plan_id)
+        latest = _latest_batch_report(batch_reports)
+        coverage_reports: tuple | None = None
+        if self._coverage_report_store is not None:
+            coverage_reports = self._coverage_report_store.list_for_replay_plan(replay_plan_id)
+        issues = _collect_readiness_issues(fingerprints, batch_reports, latest, coverage_reports)
+        status = _determine_readiness_status(issues, len(fingerprints), latest)
+        summary = _build_readiness_summary(len(fingerprints), latest, issues)
+        report = ReplayReadinessReport(
+            report_id=report_id,
+            replay_plan_id=replay_plan_id,
+            checked_at=self._now(),
+            status=status,
+            summary=summary,
+            issues=tuple(issues),
+            notes=notes,
+        )
+        self._readiness_report_store.save(report)
+        return report
+
+    def load_readiness_report(self, report_id: str) -> ReplayReadinessReport | None:
+        return self._readiness_report_store.load(report_id)
+
+    def readiness_reports_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayReadinessReport, ...]:
+        return self._readiness_report_store.list_for_replay_plan(replay_plan_id)

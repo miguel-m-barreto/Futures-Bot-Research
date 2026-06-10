@@ -637,3 +637,90 @@ def test_replay_artifact_fingerprint_batch_modules_do_not_import_execution_types
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_replay_readiness_source_does_not_import_forbidden_dependencies() -> None:
+    source = (ROOT / "src/futures_bot/replay/integrity.py").read_text(encoding="utf-8")
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "open(",
+        "write_text",
+        "read_text",
+    )
+    for name in forbidden:
+        assert name not in source, f"found {name!r} in integrity.py"
+
+
+def test_replay_readiness_test_files_do_not_import_forbidden_dependencies() -> None:
+    readiness_test_files = (
+        ROOT / "tests/unit/test_replay_readiness_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_readiness_store.py",
+        ROOT / "tests/unit/test_local_replay_readiness_checker.py",
+        ROOT / "tests/unit/test_replay_readiness_flow.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in readiness_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_readiness_modules_do_not_import_execution_types() -> None:
+    readiness_paths = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+        ROOT / "tests/unit/test_replay_readiness_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_readiness_store.py",
+        ROOT / "tests/unit/test_local_replay_readiness_checker.py",
+        ROOT / "tests/unit/test_replay_readiness_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in readiness_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

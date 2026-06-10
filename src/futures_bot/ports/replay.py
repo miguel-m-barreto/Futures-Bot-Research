@@ -9,6 +9,7 @@ from futures_bot.domain.replay import (
     ReplayArtifactKind,
     ReplayInputBatch,
     ReplayInputDataset,
+    ReplayReadinessReport,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
@@ -226,5 +227,27 @@ class ReplayArtifactFingerprintVerificationBatchReportStorePort(Protocol):
         ...
 
     def list_all(self) -> tuple[ReplayArtifactFingerprintVerificationBatchReport, ...]:
+        """Return all reports in deterministic order."""
+        ...
+
+
+class ReplayReadinessReportStorePort(Protocol):
+    """Persistence abstraction for replay readiness reports."""
+
+    def save(self, report: ReplayReadinessReport) -> None:
+        """Persist report; idempotent if identical, raises on conflict."""
+        ...
+
+    def load(self, report_id: str) -> ReplayReadinessReport | None:
+        """Return report by report_id, or None."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayReadinessReport, ...]:
+        """Return reports where replay_plan_id matches, in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayReadinessReport, ...]:
         """Return all reports in deterministic order."""
         ...
