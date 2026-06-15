@@ -7,10 +7,12 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerification,
     ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
+    ReplayEventDispatchReceipt,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayReadinessReport,
     ReplayRunManifest,
+    ReplayRunState,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
@@ -273,4 +275,61 @@ class ReplayRunManifestStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayRunManifest, ...]:
         """Return all manifests in deterministic order."""
+        ...
+
+
+class ReplayRunStateStorePort(Protocol):
+    """Persistence abstraction for deterministic replay runtime run state.
+
+    create accepts only new run IDs; exact duplicate creates may be idempotent,
+    conflicting duplicates must be rejected. replace is an optimistic compare-
+    and-swap: the stored revision must equal expected_revision, identity fields
+    cannot change, and the replacement revision must be expected_revision + 1.
+    """
+
+    def create(self, state: ReplayRunState) -> None:
+        """Persist a newly-created replay run state."""
+        ...
+
+    def load(self, run_id: str) -> ReplayRunState | None:
+        """Return run state by run_id, or None."""
+        ...
+
+    def replace(self, state: ReplayRunState, expected_revision: int) -> None:
+        """Replace run state using optimistic revision semantics."""
+        ...
+
+    def list_for_replay_plan(
+        self,
+        replay_plan_id: str,
+    ) -> tuple[ReplayRunState, ...]:
+        """Return run states for replay_plan_id in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayRunState, ...]:
+        """Return all run states in deterministic order."""
+        ...
+
+
+class ReplayEventDispatchReceiptStorePort(Protocol):
+    """Append-only store for deterministic replay event dispatch receipts.
+
+    Exact duplicate saves are idempotent; conflicting duplicate receipt IDs must
+    be rejected. Lists are returned in deterministic event order.
+    """
+
+    def save(self, receipt: ReplayEventDispatchReceipt) -> None:
+        """Persist a dispatch receipt."""
+        ...
+
+    def load(self, receipt_id: str) -> ReplayEventDispatchReceipt | None:
+        """Return receipt by receipt_id, or None."""
+        ...
+
+    def list_for_run(self, run_id: str) -> tuple[ReplayEventDispatchReceipt, ...]:
+        """Return receipts for run_id ordered by event_order_index then receipt_id."""
+        ...
+
+    def list_all(self) -> tuple[ReplayEventDispatchReceipt, ...]:
+        """Return all receipts ordered by run_id, event_order_index, receipt_id."""
         ...

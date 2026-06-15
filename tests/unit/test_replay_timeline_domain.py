@@ -253,17 +253,17 @@ class TestReplayTimeline:
         assert tl.events[0].order_index == 0
         assert tl.events[1].order_index == 1
 
-    def test_rejects_built_with_no_events(self) -> None:
-        with pytest.raises(ValidationError, match="events can be empty only for PLANNED"):
-            _timeline(
-                events=(),
-                status=ReplayTimelineStatus.BUILT,
-                input_batch_ids=("batch-1",),
-                input_dataset_ids=("ds-1",),
-            )
+    def test_valid_built_with_no_events(self) -> None:
+        tl = _timeline(
+            events=(),
+            status=ReplayTimelineStatus.BUILT,
+            input_batch_ids=("batch-1",),
+            input_dataset_ids=("ds-1",),
+        )
+        assert tl.events == ()
 
     def test_rejects_validated_with_no_events(self) -> None:
-        with pytest.raises(ValidationError, match="events can be empty only for PLANNED"):
+        with pytest.raises(ValidationError, match="events cannot be empty for VALIDATED"):
             _timeline(
                 events=(),
                 status=ReplayTimelineStatus.VALIDATED,

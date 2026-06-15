@@ -567,13 +567,13 @@ def _validate_timeline_non_empty_requirements(
     input_dataset_ids: tuple[str, ...],
     events: tuple[ReplayTimelineEvent, ...],
 ) -> None:
-    if status is not ReplayTimelineStatus.PLANNED:
+    if status is ReplayTimelineStatus.VALIDATED:
         if not input_batch_ids:
-            raise ValueError("input_batch_ids can be empty only for PLANNED timelines")
+            raise ValueError("input_batch_ids cannot be empty for VALIDATED timelines")
         if not input_dataset_ids:
-            raise ValueError("input_dataset_ids can be empty only for PLANNED timelines")
+            raise ValueError("input_dataset_ids cannot be empty for VALIDATED timelines")
         if not events:
-            raise ValueError("events can be empty only for PLANNED timelines")
+            raise ValueError("events cannot be empty for VALIDATED timelines")
 
 
 def _validate_timeline_unique_ids(
@@ -2107,3 +2107,586 @@ class ReplayRunManifest(BaseModel):
     def _validate_manifest(self) -> Self:
         _validate_manifest_status(self)
         return self
+
+
+# ---------------------------------------------------------------------------
+# Replay runtime
+# ---------------------------------------------------------------------------
+
+
+class ReplayRunStatus(StrEnum):
+    CREATED = "CREATED"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayRunState(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    manifest_id: str
+    replay_plan_id: str
+    timeline_id: str
+    timeline_fingerprint_id: str
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    paused_at: datetime | None = None
+    completed_at: datetime | None = None
+    status: ReplayRunStatus
+    revision: int
+    total_event_count: int
+    next_event_index: int
+    processed_event_count: int
+    last_processed_event_id: str | None = None
+
+    @field_validator(
+        "run_id",
+        "manifest_id",
+        "replay_plan_id",
+        "timeline_id",
+        "timeline_fingerprint_id",
+    )
+    @classmethod
+    def _validate_required_ids(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def _validate_required_datetime(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("started_at", "paused_at", "completed_at")
+    @classmethod
+    def _validate_optional_datetime(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return ensure_aware_utc(value)
+
+    @field_validator(
+        "revision",
+        "total_event_count",
+        "next_event_index",
+        "processed_event_count",
+        mode="before",
+    )
+    @classmethod
+    def _validate_integer_fields(cls, value: object) -> object:
+        return _validate_strict_int(value, "runtime integer field")
+
+    @field_validator("last_processed_event_id")
+    @classmethod
+    def _validate_last_processed_event_id(cls, value: str | None) -> str | None:
+        return _validate_optional_text(value, "last_processed_event_id")
+
+    @model_validator(mode="after")
+    def _validate_state(self) -> Self:
+        if self.revision < 0:
+            raise ValueError("revision must be >= 0")
+        if self.total_event_count < 0:
+            raise ValueError("total_event_count must be >= 0")
+        if self.next_event_index < 0:
+            raise ValueError("next_event_index must be >= 0")
+        if self.processed_event_count < 0:
+            raise ValueError("processed_event_count must be >= 0")
+        if self.next_event_index > self.total_event_count:
+            raise ValueError("next_event_index must be <= total_event_count")
+        if self.processed_event_count > self.total_event_count:
+            raise ValueError("processed_event_count must be <= total_event_count")
+        if self.processed_event_count != self.next_event_index:
+            raise ValueError("processed_event_count must equal next_event_index")
+        _validate_replay_run_temporal_order(self)
+        if self.processed_event_count == 0:
+            if self.last_processed_event_id is not None:
+                raise ValueError(
+                    "last_processed_event_id must be None when no events are processed"
+                )
+        elif self.last_processed_event_id is None:
+            raise ValueError(
+                "last_processed_event_id is required when events have been processed"
+            )
+        _validate_replay_run_status_rules(self)
+        return self
+
+
+def _validate_replay_run_temporal_order(state: ReplayRunState) -> None:
+    if state.updated_at < state.created_at:
+        raise ValueError("updated_at must be >= created_at")
+    for field_name in ("started_at", "paused_at", "completed_at"):
+        value = getattr(state, field_name)
+        if value is None:
+            continue
+        if value < state.created_at:
+            raise ValueError(f"{field_name} must be >= created_at")
+        if state.updated_at < value:
+            raise ValueError(f"updated_at must be >= {field_name}")
+    if (
+        state.started_at is not None
+        and state.paused_at is not None
+        and state.paused_at < state.started_at
+    ):
+        raise ValueError("paused_at must be >= started_at")
+    if (
+        state.started_at is not None
+        and state.completed_at is not None
+        and state.completed_at < state.started_at
+    ):
+        raise ValueError("completed_at must be >= started_at")
+
+
+def _validate_replay_run_status_rules(  # noqa: PLR0912 - explicit status matrix
+    state: ReplayRunState,
+) -> None:
+    if state.status is ReplayRunStatus.CREATED:
+        if state.revision != 0:
+            raise ValueError("CREATED requires revision == 0")
+        if state.started_at is not None:
+            raise ValueError("CREATED requires started_at is None")
+        if state.paused_at is not None:
+            raise ValueError("CREATED requires paused_at is None")
+        if state.completed_at is not None:
+            raise ValueError("CREATED requires completed_at is None")
+        if state.updated_at != state.created_at:
+            raise ValueError("CREATED requires updated_at == created_at")
+        if state.next_event_index != 0:
+            raise ValueError("CREATED requires next_event_index == 0")
+        if state.processed_event_count != 0:
+            raise ValueError("CREATED requires processed_event_count == 0")
+    elif state.status is ReplayRunStatus.RUNNING:
+        if state.started_at is None:
+            raise ValueError("RUNNING requires started_at")
+        if state.paused_at is not None:
+            raise ValueError("RUNNING requires paused_at is None")
+        if state.completed_at is not None:
+            raise ValueError("RUNNING requires completed_at is None")
+        if state.updated_at < state.started_at:
+            raise ValueError("RUNNING requires updated_at >= started_at")
+        if state.next_event_index >= state.total_event_count:
+            raise ValueError("RUNNING requires next_event_index < total_event_count")
+    elif state.status is ReplayRunStatus.PAUSED:
+        if state.started_at is None:
+            raise ValueError("PAUSED requires started_at")
+        if state.paused_at is None:
+            raise ValueError("PAUSED requires paused_at")
+        if state.completed_at is not None:
+            raise ValueError("PAUSED requires completed_at is None")
+        if state.paused_at != state.updated_at:
+            raise ValueError("PAUSED requires paused_at == updated_at")
+        if state.next_event_index >= state.total_event_count:
+            raise ValueError("PAUSED requires next_event_index < total_event_count")
+    elif state.status is ReplayRunStatus.COMPLETED:
+        if state.started_at is None:
+            raise ValueError("COMPLETED requires started_at")
+        if state.completed_at is None:
+            raise ValueError("COMPLETED requires completed_at")
+        if state.paused_at is not None:
+            raise ValueError("COMPLETED requires paused_at is None")
+        if state.completed_at != state.updated_at:
+            raise ValueError("COMPLETED requires completed_at == updated_at")
+        if state.next_event_index != state.total_event_count:
+            raise ValueError("COMPLETED requires next_event_index == total_event_count")
+        if state.processed_event_count != state.total_event_count:
+            raise ValueError(
+                "COMPLETED requires processed_event_count == total_event_count"
+            )
+
+
+def build_replay_event_dispatch_receipt_id(
+    run_id: str,
+    event_order_index: int,
+    event_id: str,
+) -> str:
+    """Build a deterministic, delimiter-safe replay dispatch receipt ID."""
+    run_id = _validate_required_text(run_id, "run_id")
+    event_id = _validate_required_text(event_id, "event_id")
+    _validate_strict_int(event_order_index, "event_order_index")
+    if event_order_index < 0:
+        raise ValueError("event_order_index must be >= 0")
+    material = {
+        "event_id": event_id,
+        "event_order_index": event_order_index,
+        "run_id": run_id,
+    }
+    canonical = json.dumps(
+        material,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"replay-dispatch:{digest}"
+
+
+class ReplayEventDispatchReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    receipt_id: str
+    run_id: str
+    manifest_id: str
+    replay_plan_id: str
+    timeline_id: str
+    timeline_fingerprint_id: str
+    event_id: str
+    event_order_index: int
+    event_time: datetime
+    event_kind: ReplayInputKind
+
+    @field_validator(
+        "receipt_id",
+        "run_id",
+        "manifest_id",
+        "replay_plan_id",
+        "timeline_id",
+        "timeline_fingerprint_id",
+        "event_id",
+    )
+    @classmethod
+    def _validate_required_ids(cls, value: str) -> str:
+        return _validate_required_text(value, "field")
+
+    @field_validator("event_order_index", mode="before")
+    @classmethod
+    def _validate_event_order_index(cls, value: object) -> object:
+        return _validate_strict_int(value, "event_order_index")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> Self:
+        if self.event_order_index < 0:
+            raise ValueError("event_order_index must be >= 0")
+        expected_receipt_id = build_replay_event_dispatch_receipt_id(
+            self.run_id,
+            self.event_order_index,
+            self.event_id,
+        )
+        if self.receipt_id != expected_receipt_id:
+            raise ValueError("receipt_id must match deterministic replay dispatch ID")
+        return self
+
+
+class ReplayRunStepResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    previous_status: ReplayRunStatus
+    current_status: ReplayRunStatus
+    previous_revision: int
+    current_revision: int
+    previous_next_event_index: int
+    previous_processed_event_count: int
+    processed_receipts: tuple[ReplayEventDispatchReceipt, ...] = ()
+    next_event_index: int
+    processed_event_count: int
+    total_event_count: int
+    completed: bool
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str) -> str:
+        return _validate_required_text(value, "run_id")
+
+    @field_validator(
+        "previous_revision",
+        "current_revision",
+        "previous_next_event_index",
+        "previous_processed_event_count",
+        "next_event_index",
+        "processed_event_count",
+        "total_event_count",
+        mode="before",
+    )
+    @classmethod
+    def _validate_integer_fields(cls, value: object) -> object:
+        return _validate_strict_int(value, "step result integer field")
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> Self:  # noqa: PLR0912, PLR0915 - explicit transition matrix
+        if self.previous_revision < 0:
+            raise ValueError("previous_revision must be >= 0")
+        if self.current_revision < 0:
+            raise ValueError("current_revision must be >= 0")
+        if self.current_revision != self.previous_revision + 1:
+            raise ValueError("current_revision must equal previous_revision + 1")
+        if self.previous_next_event_index < 0:
+            raise ValueError("previous_next_event_index must be >= 0")
+        if self.previous_processed_event_count < 0:
+            raise ValueError("previous_processed_event_count must be >= 0")
+        if self.next_event_index < 0:
+            raise ValueError("next_event_index must be >= 0")
+        if self.processed_event_count < 0:
+            raise ValueError("processed_event_count must be >= 0")
+        if self.total_event_count < 0:
+            raise ValueError("total_event_count must be >= 0")
+        if self.next_event_index > self.total_event_count:
+            raise ValueError("next_event_index must be <= total_event_count")
+        if self.processed_event_count > self.total_event_count:
+            raise ValueError("processed_event_count must be <= total_event_count")
+        if self.previous_next_event_index > self.total_event_count:
+            raise ValueError("previous_next_event_index must be <= total_event_count")
+        if self.previous_processed_event_count > self.total_event_count:
+            raise ValueError(
+                "previous_processed_event_count must be <= total_event_count"
+            )
+        if self.previous_processed_event_count != self.previous_next_event_index:
+            raise ValueError(
+                "previous_processed_event_count must equal previous_next_event_index"
+            )
+        if self.processed_event_count != self.next_event_index:
+            raise ValueError("processed_event_count must equal next_event_index")
+        if self.next_event_index < self.previous_next_event_index:
+            raise ValueError("next_event_index must be >= previous_next_event_index")
+        if self.processed_event_count < self.previous_processed_event_count:
+            raise ValueError(
+                "processed_event_count must be >= previous_processed_event_count"
+            )
+        progress_delta = self.next_event_index - self.previous_next_event_index
+        if progress_delta != len(self.processed_receipts):
+            raise ValueError("receipt count must equal replay progress delta")
+        order_indexes = [r.event_order_index for r in self.processed_receipts]
+        expected_indexes = list(
+            range(self.previous_next_event_index, self.next_event_index)
+        )
+        if order_indexes != expected_indexes:
+            raise ValueError("processed receipt order indexes must exactly match progress")
+        receipt_ids = [r.receipt_id for r in self.processed_receipts]
+        if len(set(receipt_ids)) != len(receipt_ids):
+            raise ValueError("duplicate receipt_id values are not allowed")
+        for receipt in self.processed_receipts:
+            if receipt.run_id != self.run_id:
+                raise ValueError("processed receipt run_id must match result run_id")
+        _validate_replay_run_step_transition(self, progress_delta)
+        if self.current_status is ReplayRunStatus.COMPLETED:
+            if self.next_event_index != self.total_event_count:
+                raise ValueError(
+                    "COMPLETED result requires next_event_index == total_event_count"
+                )
+            if self.processed_event_count != self.total_event_count:
+                raise ValueError(
+                    "COMPLETED result requires processed_event_count == total_event_count"
+                )
+        if (
+            self.current_status is ReplayRunStatus.RUNNING
+            and self.next_event_index >= self.total_event_count
+        ):
+            raise ValueError("RUNNING result requires next_event_index < total_event_count")
+        if self.completed != (self.current_status is ReplayRunStatus.COMPLETED):
+            raise ValueError("completed must match whether current_status is COMPLETED")
+        return self
+
+
+def _validate_replay_run_step_transition(  # noqa: PLR0912 - explicit result matrix
+    result: ReplayRunStepResult,
+    progress_delta: int,
+) -> None:
+    transition = (result.previous_status, result.current_status)
+    if result.previous_status is ReplayRunStatus.CREATED:
+        if result.previous_revision != 0:
+            raise ValueError("CREATED result history requires previous_revision == 0")
+        if result.previous_next_event_index != 0:
+            raise ValueError(
+                "CREATED result history requires previous_next_event_index == 0"
+            )
+        if result.previous_processed_event_count != 0:
+            raise ValueError(
+                "CREATED result history requires previous_processed_event_count == 0"
+            )
+    if result.previous_status in {ReplayRunStatus.RUNNING, ReplayRunStatus.PAUSED}:
+        if result.previous_next_event_index >= result.total_event_count:
+            raise ValueError(
+                "active result history requires previous_next_event_index < "
+                "total_event_count"
+            )
+        if result.previous_processed_event_count >= result.total_event_count:
+            raise ValueError(
+                "active result history requires previous_processed_event_count < "
+                "total_event_count"
+            )
+    if result.current_status is ReplayRunStatus.PAUSED:
+        if result.next_event_index >= result.total_event_count:
+            raise ValueError("PAUSED result requires next_event_index < total_event_count")
+        if result.processed_event_count >= result.total_event_count:
+            raise ValueError(
+                "PAUSED result requires processed_event_count < total_event_count"
+            )
+    no_progress_transitions = {
+        (ReplayRunStatus.CREATED, ReplayRunStatus.RUNNING),
+        (ReplayRunStatus.CREATED, ReplayRunStatus.COMPLETED),
+        (ReplayRunStatus.RUNNING, ReplayRunStatus.PAUSED),
+        (ReplayRunStatus.PAUSED, ReplayRunStatus.RUNNING),
+    }
+    step_transitions = {
+        (ReplayRunStatus.RUNNING, ReplayRunStatus.RUNNING),
+        (ReplayRunStatus.RUNNING, ReplayRunStatus.COMPLETED),
+    }
+    if transition in no_progress_transitions:
+        if transition == (ReplayRunStatus.CREATED, ReplayRunStatus.COMPLETED):
+            if result.total_event_count != 0:
+                raise ValueError("CREATED -> COMPLETED requires total_event_count == 0")
+            if result.previous_next_event_index != 0 or result.next_event_index != 0:
+                raise ValueError("CREATED -> COMPLETED requires zero progress indexes")
+        if (
+            transition == (ReplayRunStatus.CREATED, ReplayRunStatus.RUNNING)
+            and result.total_event_count <= 0
+        ):
+            raise ValueError("CREATED -> RUNNING requires total_event_count > 0")
+        if (
+            transition == (ReplayRunStatus.CREATED, ReplayRunStatus.RUNNING)
+            and (
+                result.next_event_index != 0
+                or result.processed_event_count != 0
+            )
+        ):
+            raise ValueError("CREATED -> RUNNING requires zero current progress")
+        if result.processed_receipts:
+            raise ValueError("no-progress transitions require no receipts")
+        if progress_delta != 0:
+            raise ValueError("no-progress transitions require unchanged progress")
+        return
+    if transition in step_transitions:
+        if progress_delta <= 0:
+            raise ValueError("RUNNING step transitions require progress")
+        if not result.processed_receipts:
+            raise ValueError("RUNNING step transitions require receipts")
+        return
+    raise ValueError(
+        f"invalid replay run transition {result.previous_status.value} -> "
+        f"{result.current_status.value}"
+    )
+
+
+_REPLAY_RUN_STATE_IDENTITY_FIELDS = (
+    "run_id",
+    "manifest_id",
+    "replay_plan_id",
+    "timeline_id",
+    "timeline_fingerprint_id",
+    "created_at",
+    "total_event_count",
+)
+
+
+def validate_replay_run_state_transition(
+    previous: ReplayRunState,
+    current: ReplayRunState,
+) -> None:
+    """Validate an allowed Sprint 30 transition between two replay run states."""
+    for field_name in _REPLAY_RUN_STATE_IDENTITY_FIELDS:
+        if getattr(previous, field_name) != getattr(current, field_name):
+            raise ValueError(f"replay run identity field cannot change: {field_name}")
+    if current.revision != previous.revision + 1:
+        raise ValueError("current revision must equal previous revision + 1")
+    if current.updated_at < previous.updated_at:
+        raise ValueError("current updated_at must be >= previous updated_at")
+    _validate_replay_run_state_status_transition(previous, current)
+    _validate_replay_run_state_timestamp_transition(previous, current)
+
+
+def _validate_replay_run_state_timestamp_transition(  # noqa: PLR0912 - explicit timestamp matrix
+    previous: ReplayRunState,
+    current: ReplayRunState,
+) -> None:
+    if previous.started_at is None:
+        if current.status in {ReplayRunStatus.RUNNING, ReplayRunStatus.COMPLETED}:
+            if current.started_at != current.updated_at:
+                raise ValueError(
+                    "started_at must be set to updated_at when starting a run"
+                )
+        elif current.started_at is not None:
+            raise ValueError("started_at cannot be set outside a start transition")
+    elif current.started_at != previous.started_at:
+        raise ValueError("started_at cannot change once set")
+
+    if previous.completed_at is None:
+        if current.status is ReplayRunStatus.COMPLETED:
+            if current.completed_at != current.updated_at:
+                raise ValueError(
+                    "completed_at must be set to updated_at when completing a run"
+                )
+        elif current.completed_at is not None:
+            raise ValueError("completed_at can only be set by completion")
+    elif current.completed_at != previous.completed_at:
+        raise ValueError("completed_at cannot change once set")
+
+    transition = (previous.status, current.status)
+    if transition == (ReplayRunStatus.RUNNING, ReplayRunStatus.PAUSED):
+        if current.paused_at != current.updated_at:
+            raise ValueError("paused_at must be set to updated_at when pausing")
+    elif transition == (ReplayRunStatus.PAUSED, ReplayRunStatus.RUNNING):
+        if current.paused_at is not None:
+            raise ValueError("paused_at must be cleared when resuming")
+    elif current.paused_at != previous.paused_at:
+        raise ValueError("paused_at changed outside pause/resume transition")
+
+
+def _validate_replay_run_state_status_transition(
+    previous: ReplayRunState,
+    current: ReplayRunState,
+) -> None:
+    transition = (previous.status, current.status)
+    if transition == (ReplayRunStatus.CREATED, ReplayRunStatus.RUNNING):
+        _require_no_replay_run_progress_change(previous, current)
+        if current.total_event_count <= 0:
+            raise ValueError("CREATED -> RUNNING requires total_event_count > 0")
+        return
+    if transition == (ReplayRunStatus.CREATED, ReplayRunStatus.COMPLETED):
+        _require_no_replay_run_progress_change(previous, current)
+        if current.total_event_count != 0:
+            raise ValueError("CREATED -> COMPLETED requires total_event_count == 0")
+        return
+    if transition == (ReplayRunStatus.RUNNING, ReplayRunStatus.PAUSED):
+        _require_no_replay_run_progress_change(previous, current)
+        return
+    if transition == (ReplayRunStatus.PAUSED, ReplayRunStatus.RUNNING):
+        _require_no_replay_run_progress_change(previous, current)
+        return
+    if transition == (ReplayRunStatus.RUNNING, ReplayRunStatus.RUNNING):
+        _require_replay_run_positive_progress(previous, current)
+        if current.next_event_index >= current.total_event_count:
+            raise ValueError("RUNNING -> RUNNING requires next_event_index < total_event_count")
+        return
+    if transition == (ReplayRunStatus.RUNNING, ReplayRunStatus.COMPLETED):
+        _require_replay_run_positive_progress(previous, current)
+        if current.next_event_index != current.total_event_count:
+            raise ValueError("RUNNING -> COMPLETED requires next_event_index == total_event_count")
+        return
+    raise ValueError(
+        f"invalid replay run state transition {previous.status.value} -> "
+        f"{current.status.value}"
+    )
+
+
+def _require_no_replay_run_progress_change(
+    previous: ReplayRunState,
+    current: ReplayRunState,
+) -> None:
+    if current.next_event_index != previous.next_event_index:
+        raise ValueError("transition requires unchanged next_event_index")
+    if current.processed_event_count != previous.processed_event_count:
+        raise ValueError("transition requires unchanged processed_event_count")
+    if current.last_processed_event_id != previous.last_processed_event_id:
+        raise ValueError("transition requires unchanged last_processed_event_id")
+
+
+def _require_replay_run_positive_progress(
+    previous: ReplayRunState,
+    current: ReplayRunState,
+) -> None:
+    index_delta = current.next_event_index - previous.next_event_index
+    processed_delta = current.processed_event_count - previous.processed_event_count
+    if index_delta <= 0:
+        raise ValueError("progress transition requires next_event_index to increase")
+    if processed_delta != index_delta:
+        raise ValueError("processed/index progress deltas must match")
+    if current.last_processed_event_id is None:
+        raise ValueError("progress transition requires last_processed_event_id")
+    if current.last_processed_event_id == previous.last_processed_event_id:
+        raise ValueError(
+            "progress transition requires last_processed_event_id to advance"
+        )

@@ -9,15 +9,19 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerification,
     ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
+    ReplayEventDispatchReceipt,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayReadinessReport,
     ReplayRunManifest,
+    ReplayRunState,
+    ReplayRunStatus,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
     ReplayTimelineCursorStatus,
+    validate_replay_run_state_transition,
 )
 
 _CURSOR_ALLOWED_TRANSITIONS: dict[
@@ -587,5 +591,112 @@ class InMemoryReplayRunManifestStore:
             sorted(
                 self._manifests.values(),
                 key=lambda m: (m.created_at, m.manifest_id),
+            )
+        )
+
+
+class InMemoryReplayRunStateStore:
+    """In-memory replay runtime state store with optimistic revision checks.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._states: dict[str, ReplayRunState] = {}
+
+    def create(self, state: ReplayRunState) -> None:
+        """Persist a new run state, allowing exact duplicate creates."""
+        revalidated = ReplayRunState.model_validate(state.model_dump())
+        if revalidated.status is not ReplayRunStatus.CREATED:
+            raise ValueError("replay run state create requires CREATED status")
+        if revalidated.revision != 0:
+            raise ValueError("replay run state create requires revision 0")
+        existing = self._states.get(revalidated.run_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(f"run_id conflict for {revalidated.run_id!r}")
+            return
+        self._states[revalidated.run_id] = revalidated
+
+    def load(self, run_id: str) -> ReplayRunState | None:
+        """Return replay run state by run_id, or None."""
+        return self._states.get(run_id)
+
+    def replace(self, state: ReplayRunState, expected_revision: int) -> None:
+        """Replace run state if the stored revision matches expected_revision."""
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise ValueError("expected_revision must be a strict integer")
+        revalidated = ReplayRunState.model_validate(state.model_dump())
+        existing = self._states.get(revalidated.run_id)
+        if existing is None:
+            raise ValueError(f"replay run state not found: {revalidated.run_id!r}")
+        if existing.revision != expected_revision:
+            raise ValueError(
+                "stale replay run revision: "
+                f"expected {expected_revision}, stored {existing.revision}"
+            )
+        validate_replay_run_state_transition(existing, revalidated)
+        self._states[revalidated.run_id] = revalidated
+
+    def list_for_replay_plan(
+        self,
+        replay_plan_id: str,
+    ) -> tuple[ReplayRunState, ...]:
+        """Return run states for replay_plan_id sorted by created_at then run_id."""
+        return tuple(
+            sorted(
+                (s for s in self._states.values() if s.replay_plan_id == replay_plan_id),
+                key=lambda s: (s.created_at, s.run_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayRunState, ...]:
+        """Return all run states sorted by created_at then run_id."""
+        return tuple(
+            sorted(
+                self._states.values(),
+                key=lambda s: (s.created_at, s.run_id),
+            )
+        )
+
+
+class InMemoryReplayEventDispatchReceiptStore:
+    """Append-only in-memory replay event dispatch receipt store.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._receipts: dict[str, ReplayEventDispatchReceipt] = {}
+
+    def save(self, receipt: ReplayEventDispatchReceipt) -> None:
+        """Save a receipt, allowing exact duplicate saves only."""
+        revalidated = ReplayEventDispatchReceipt.model_validate(receipt.model_dump())
+        existing = self._receipts.get(revalidated.receipt_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(f"receipt_id conflict for {revalidated.receipt_id!r}")
+            return
+        self._receipts[revalidated.receipt_id] = revalidated
+
+    def load(self, receipt_id: str) -> ReplayEventDispatchReceipt | None:
+        """Return receipt by receipt_id, or None."""
+        return self._receipts.get(receipt_id)
+
+    def list_for_run(self, run_id: str) -> tuple[ReplayEventDispatchReceipt, ...]:
+        """Return receipts for run_id sorted by event_order_index then receipt_id."""
+        return tuple(
+            sorted(
+                (r for r in self._receipts.values() if r.run_id == run_id),
+                key=lambda r: (r.event_order_index, r.receipt_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayEventDispatchReceipt, ...]:
+        """Return all receipts sorted by run_id, event_order_index, receipt_id."""
+        return tuple(
+            sorted(
+                self._receipts.values(),
+                key=lambda r: (r.run_id, r.event_order_index, r.receipt_id),
             )
         )

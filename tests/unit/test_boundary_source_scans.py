@@ -639,6 +639,58 @@ def test_replay_artifact_fingerprint_batch_modules_do_not_import_execution_types
             )
 
 
+def test_replay_runtime_source_does_not_import_or_use_forbidden_dependencies() -> None:
+    path = ROOT / "src/futures_bot/replay/runtime.py"
+    source = path.read_text(encoding="utf-8")
+    import_lines = _import_lines(path)
+    forbidden_source = (
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "LocalJsonlWal",
+        "sidecars",
+        "open(",
+        "write_text",
+        "read_text",
+        "subprocess",
+        "threading",
+        "asyncio",
+        "sleep",
+        "exchange",
+        "adapter",
+        "DecisionStack",
+        "HardRiskGate",
+        "RiskBehaviorModel",
+        "RiskGate",
+        "EvaluationResultSet",
+        "MetricObservation",
+        "PnL",
+    )
+    for name in forbidden_source:
+        assert name not in source, f"found {name!r} in runtime.py"
+    forbidden_imports = (
+        "ledger",
+        "execution",
+        "orders",
+        "fills",
+        "metrics",
+        "evaluation",
+        "performance",
+    )
+    for name in forbidden_imports:
+        assert not any(name in line for line in import_lines), (
+            f"found {name!r} import in runtime.py"
+        )
+
+
 def test_replay_readiness_source_does_not_import_forbidden_dependencies() -> None:
     source = (ROOT / "src/futures_bot/replay/integrity.py").read_text(encoding="utf-8")
     forbidden = (
