@@ -10,6 +10,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayReadinessReport,
+    ReplayRunManifest,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
@@ -250,4 +251,26 @@ class ReplayReadinessReportStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayReadinessReport, ...]:
         """Return all reports in deterministic order."""
+        ...
+
+
+class ReplayRunManifestStorePort(Protocol):
+    """Persistence abstraction for replay run manifests."""
+
+    def save(self, manifest: ReplayRunManifest) -> None:
+        """Persist manifest; idempotent if identical, raises on conflict."""
+        ...
+
+    def load(self, manifest_id: str) -> ReplayRunManifest | None:
+        """Return manifest by manifest_id, or None."""
+        ...
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayRunManifest, ...]:
+        """Return manifests where replay_plan_id matches, in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayRunManifest, ...]:
+        """Return all manifests in deterministic order."""
         ...

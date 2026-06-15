@@ -194,6 +194,23 @@ class TestInMemoryReplayArtifactFingerprintVerificationBatchReportStore:
         with pytest.raises((ValidationError, ValueError)):
             store.save(tampered)
 
+    def test_model_copy_valid_item_positive_issue_count_rejected(self) -> None:
+        store = InMemoryReplayArtifactFingerprintVerificationBatchReportStore()
+        r = _report()
+        store.save(r)
+        tampered_item = r.items[0].model_copy(update={"issue_count": 1})
+        tampered_summary = r.summary.model_copy(update={"total_issues": 1})
+        tampered = r.model_copy(
+            update={
+                "report_id": "rpt-tamper-valid-issues",
+                "items": (tampered_item,),
+                "summary": tampered_summary,
+            }
+        )
+
+        with pytest.raises((ValidationError, ValueError)):
+            store.save(tampered)
+
     def test_model_copy_total_fingerprints_string_rejected(self) -> None:
         store = InMemoryReplayArtifactFingerprintVerificationBatchReportStore()
         r = _report()

@@ -106,19 +106,25 @@ def _batch_report(  # noqa: PLR0913
     else:
         count_by_status = {}
         ver_status = ReplayArtifactFingerprintVerificationStatus.VALID
+    issue_count = 1 if ver_status in {
+        ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+        ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT,
+        ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT,
+    } else 0
     items = tuple(
         ReplayArtifactFingerprintVerificationBatchItem(
             item_id=f"{report_id}:{fp_id}:item",
             fingerprint_id=fp_id,
             verification_id=f"{report_id}:{fp_id}:verification",
             verification_status=ver_status,
+            issue_count=issue_count,
         )
         for fp_id in fingerprint_ids
     )
     summary = ReplayArtifactFingerprintVerificationBatchSummary(
         total_fingerprints=total,
         count_by_status=count_by_status,
-        total_issues=0,
+        total_issues=issue_count * total,
         all_valid=(total > 0 and all_valid),
         has_mismatches=has_mismatches,
         has_missing=has_missing,
@@ -149,12 +155,18 @@ def _batch_report_mixed(
     built_items: list[ReplayArtifactFingerprintVerificationBatchItem] = []
     for ver_status, fp_ids in items_by_status.items():
         count_by_status[ver_status] = len(fp_ids)
+        issue_count = 1 if ver_status in {
+            ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+            ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT,
+            ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT,
+        } else 0
         built_items.extend(
             ReplayArtifactFingerprintVerificationBatchItem(
                 item_id=f"{report_id}:{fp_id}:item",
                 fingerprint_id=fp_id,
                 verification_id=f"{report_id}:{fp_id}:verification",
                 verification_status=ver_status,
+                issue_count=issue_count,
             )
             for fp_id in fp_ids
         )
@@ -173,7 +185,7 @@ def _batch_report_mixed(
     summary = ReplayArtifactFingerprintVerificationBatchSummary(
         total_fingerprints=total,
         count_by_status=count_by_status,
-        total_issues=0,
+        total_issues=sum(item.issue_count for item in built_items),
         all_valid=all_valid,
         has_mismatches=mismatch_count > 0,
         has_missing=(missing_fp + missing_art) > 0,

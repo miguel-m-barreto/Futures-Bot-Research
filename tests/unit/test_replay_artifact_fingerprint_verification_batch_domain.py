@@ -127,6 +127,7 @@ class TestReplayArtifactFingerprintVerificationBatchItem:
             fingerprint_id="fp-1",
             verification_id="ver-1",
             verification_status=ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT,
+            issue_count=1,
         )
         assert item.artifact_kind is None
         assert item.artifact_id is None
@@ -146,7 +147,12 @@ class TestReplayArtifactFingerprintVerificationBatchItem:
 
     def test_all_statuses_accepted(self) -> None:
         for vs in ReplayArtifactFingerprintVerificationStatus:
-            item = _make_item(verification_status=vs)
+            issue_count = 1 if vs in {
+                ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+                ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT,
+                ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT,
+            } else 0
+            item = _make_item(verification_status=vs, issue_count=issue_count)
             assert item.verification_status is vs
 
     def test_frozen(self) -> None:
@@ -168,9 +174,53 @@ class TestReplayArtifactFingerprintVerificationBatchItem:
         item = _make_item()
         assert item.issue_count == 0
 
-    def test_issue_count_positive(self) -> None:
-        item = _make_item(issue_count=3)
+    def test_issue_count_positive_for_mismatch(self) -> None:
+        item = _make_item(
+            verification_status=ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+            issue_count=3,
+        )
         assert item.issue_count == 3
+
+    def test_valid_item_with_positive_issue_count_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="VALID"):
+            _make_item(issue_count=1)
+
+    def test_valid_item_with_zero_issue_count_accepted(self) -> None:
+        item = _make_item(issue_count=0)
+        assert item.verification_status is ReplayArtifactFingerprintVerificationStatus.VALID
+        assert item.issue_count == 0
+
+    def test_mismatch_with_zero_issue_count_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="issue_count > 0"):
+            _make_item(
+                verification_status=ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+                issue_count=0,
+            )
+
+    def test_missing_fingerprint_with_zero_issue_count_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="issue_count > 0"):
+            _make_item(
+                verification_status=(
+                    ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT
+                ),
+                issue_count=0,
+            )
+
+    def test_missing_artifact_with_zero_issue_count_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="issue_count > 0"):
+            _make_item(
+                verification_status=(
+                    ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT
+                ),
+                issue_count=0,
+            )
+
+    def test_invalidated_with_zero_issue_count_accepted(self) -> None:
+        item = _make_item(
+            verification_status=ReplayArtifactFingerprintVerificationStatus.INVALIDATED,
+            issue_count=0,
+        )
+        assert item.issue_count == 0
 
     def test_issue_count_negative_rejected(self) -> None:
         with pytest.raises(ValidationError, match="issue_count"):
@@ -253,8 +303,12 @@ class TestReplayArtifactFingerprintVerificationBatchSummary:
         )
         assert s.has_missing is True
 
-    def test_total_issues_field(self) -> None:
-        s = _make_summary(total_fingerprints=1, total_issues=5)
+    def test_total_issues_field_for_mismatch(self) -> None:
+        s = _make_summary(
+            total_fingerprints=1,
+            count_by_status={ReplayArtifactFingerprintVerificationStatus.MISMATCH: 1},
+            total_issues=5,
+        )
         assert s.total_issues == 5
 
     def test_bool_total_fingerprints_rejected(self) -> None:
@@ -354,6 +408,17 @@ class TestReplayArtifactFingerprintVerificationBatchSummary:
                 count_by_status={ReplayArtifactFingerprintVerificationStatus.VALID: 2},
                 total_issues=0,
                 all_valid=False,
+                has_mismatches=False,
+                has_missing=False,
+            )
+
+    def test_all_valid_with_total_issues_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="total_issues"):
+            ReplayArtifactFingerprintVerificationBatchSummary(
+                total_fingerprints=1,
+                count_by_status={ReplayArtifactFingerprintVerificationStatus.VALID: 1},
+                total_issues=1,
+                all_valid=True,
                 has_mismatches=False,
                 has_missing=False,
             )
@@ -620,6 +685,7 @@ class TestReplayArtifactFingerprintVerificationBatchReport:
                 "fp-2",
                 "ver-2",
                 verification_status=ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+                issue_count=1,
             ),
         )
         bad_summary = _make_summary(
@@ -641,8 +707,17 @@ class TestReplayArtifactFingerprintVerificationBatchReport:
             )
 
     def test_summary_total_issues_mismatch_raises(self) -> None:
-        items = (_make_item(issue_count=2),)
-        bad_summary = _make_summary(total_fingerprints=1, total_issues=0)
+        items = (
+            _make_item(
+                verification_status=ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+                issue_count=2,
+            ),
+        )
+        bad_summary = _make_summary(
+            total_fingerprints=1,
+            count_by_status={ReplayArtifactFingerprintVerificationStatus.MISMATCH: 1},
+            total_issues=0,
+        )
         with pytest.raises(ValidationError, match="total_issues"):
             ReplayArtifactFingerprintVerificationBatchReport(
                 report_id="rpt-1",
@@ -800,6 +875,7 @@ class TestReplayArtifactFingerprintVerificationBatchReport:
                 artifact_kind=None,
                 artifact_id=None,
                 replay_plan_id=None,
+                issue_count=1,
             ),
         )
         bad_summary = _make_summary(
@@ -845,6 +921,7 @@ class TestReplayArtifactFingerprintVerificationBatchReport:
                 "fp-1",
                 "ver-1",
                 verification_status=ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT,
+                issue_count=1,
             ),
         )
         bad_summary = _make_summary(

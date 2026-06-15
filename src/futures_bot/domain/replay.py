@@ -1583,6 +1583,23 @@ class ReplayArtifactFingerprintVerificationBatchItem(BaseModel):
             raise ValueError("replay_plan_id must be non-empty if provided")
         if self.issue_count < 0:
             raise ValueError("issue_count must be >= 0")
+        if (
+            self.verification_status is ReplayArtifactFingerprintVerificationStatus.VALID
+            and self.issue_count != 0
+        ):
+            raise ValueError("VALID batch item requires issue_count == 0")
+        if (
+            self.verification_status
+            in {
+                ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+                ReplayArtifactFingerprintVerificationStatus.MISSING_FINGERPRINT,
+                ReplayArtifactFingerprintVerificationStatus.MISSING_ARTIFACT,
+            }
+            and self.issue_count == 0
+        ):
+            raise ValueError(
+                "non-VALID failed batch item requires issue_count > 0"
+            )
         return self
 
 
@@ -1633,6 +1650,8 @@ class ReplayArtifactFingerprintVerificationBatchSummary(BaseModel):
         )
         if self.all_valid != expected_all_valid:
             raise ValueError("all_valid is inconsistent with count_by_status")
+        if self.all_valid and self.total_issues != 0:
+            raise ValueError("all_valid summary requires total_issues == 0")
         mismatch_count = self.count_by_status.get(
             ReplayArtifactFingerprintVerificationStatus.MISMATCH, 0
         )
@@ -1837,6 +1856,26 @@ class ReplayReadinessSummary(BaseModel):
         return self
 
 
+def _validate_ready_readiness_status(r: ReplayReadinessReport) -> None:
+    if r.issues:
+        raise ValueError("READY status requires no issues")
+    if r.summary.total_fingerprints == 0:
+        raise ValueError("READY status requires total_fingerprints > 0")
+    if r.summary.latest_batch_report_id is None:
+        raise ValueError("READY status requires latest_batch_report_id")
+    if r.summary.latest_batch_total_fingerprints is None:
+        raise ValueError("READY status requires latest_batch_total_fingerprints")
+    if r.summary.latest_batch_total_fingerprints != r.summary.total_fingerprints:
+        raise ValueError(
+            "READY status requires latest_batch_total_fingerprints to match "
+            "total_fingerprints"
+        )
+    if r.summary.latest_batch_all_valid is not True:
+        raise ValueError("READY status requires latest_batch_all_valid is True")
+    if r.summary.latest_batch_total_issues != 0:
+        raise ValueError("READY status requires latest_batch_total_issues == 0")
+
+
 def _validate_readiness_status(
     r: ReplayReadinessReport,
     error_count: int,
@@ -1844,22 +1883,14 @@ def _validate_readiness_status(
 ) -> None:
     s = r.status
     if s is ReplayReadinessStatus.READY:
-        if r.issues:
-            raise ValueError("READY status requires no issues")
-        if r.summary.total_fingerprints == 0:
-            raise ValueError("READY status requires total_fingerprints > 0")
-        if r.summary.latest_batch_report_id is None:
-            raise ValueError("READY status requires latest_batch_report_id")
-        if r.summary.latest_batch_all_valid is not True:
-            raise ValueError("READY status requires latest_batch_all_valid is True")
+        _validate_ready_readiness_status(r)
     elif s is ReplayReadinessStatus.WARNING:
         if warn_count == 0:
             raise ValueError("WARNING status requires at least one WARNING issue")
         if error_count > 0:
             raise ValueError("WARNING status requires no ERROR issues")
-    elif s is ReplayReadinessStatus.BLOCKED:
-        if error_count == 0:
-            raise ValueError("BLOCKED status requires at least one ERROR issue")
+    elif s is ReplayReadinessStatus.BLOCKED and error_count == 0:
+        raise ValueError("BLOCKED status requires at least one ERROR issue")
 
 
 class ReplayReadinessReport(BaseModel):
@@ -1909,4 +1940,170 @@ class ReplayReadinessReport(BaseModel):
         if self.summary.info_issue_count != info_count:
             raise ValueError("summary.info_issue_count does not match INFO issue count")
         _validate_readiness_status(self, error_count, warn_count)
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Replay run manifest
+# ---------------------------------------------------------------------------
+
+
+class ReplayRunManifestStatus(StrEnum):
+    PLANNED = "PLANNED"
+    BLOCKED = "BLOCKED"
+    INVALIDATED = "INVALIDATED"
+
+
+class ReplayRunIntentKind(StrEnum):
+    REPLAY_ONLY = "REPLAY_ONLY"
+    BACKTEST = "BACKTEST"
+    PAPER_SIMULATION = "PAPER_SIMULATION"
+    OTHER = "OTHER"
+
+
+class ReplayRunReadinessBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    readiness_report_id: str
+    readiness_replay_plan_id: str
+    readiness_status: ReplayReadinessStatus
+    readiness_checked_at: datetime
+    readiness_total_fingerprints: int
+    readiness_latest_batch_report_id: str | None = None
+    verified_fingerprint_ids: tuple[str, ...] = ()
+
+    @field_validator("readiness_report_id", "readiness_replay_plan_id")
+    @classmethod
+    def _validate_required_ids(cls, v: str) -> str:
+        return _validate_required_text(v, "readiness binding id")
+
+    @field_validator("readiness_checked_at")
+    @classmethod
+    def _validate_readiness_checked_at(cls, v: datetime) -> datetime:
+        return ensure_aware_utc(v)
+
+    @field_validator("readiness_total_fingerprints", mode="before")
+    @classmethod
+    def _validate_readiness_total_fingerprints(cls, v: object) -> object:
+        return _validate_strict_int(v, "readiness_total_fingerprints")
+
+    @field_validator("readiness_latest_batch_report_id")
+    @classmethod
+    def _validate_readiness_latest_batch_report_id(cls, v: str | None) -> str | None:
+        return _validate_optional_text(v, "readiness_latest_batch_report_id")
+
+    @field_validator("verified_fingerprint_ids")
+    @classmethod
+    def _validate_verified_fingerprint_ids(
+        cls, v: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        for fp_id in v:
+            _validate_required_text(fp_id, "verified_fingerprint_id")
+        if len(v) != len(set(v)):
+            raise ValueError("duplicate fingerprint_id in verified_fingerprint_ids")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_non_negative(self) -> Self:
+        if self.readiness_total_fingerprints < 0:
+            raise ValueError("readiness_total_fingerprints must be >= 0")
+        return self
+
+
+def _validate_planned_manifest(m: ReplayRunManifest) -> None:
+    if m.readiness.readiness_status is not ReplayReadinessStatus.READY:
+        raise ValueError("PLANNED status requires readiness_status READY")
+    if m.readiness.readiness_total_fingerprints == 0:
+        raise ValueError("PLANNED status requires readiness_total_fingerprints > 0")
+    if not m.fingerprint_ids:
+        raise ValueError("PLANNED status requires non-empty fingerprint_ids")
+    if m.replay_plan_id != m.readiness.readiness_replay_plan_id:
+        raise ValueError(
+            "PLANNED status requires replay_plan_id to match "
+            "readiness.readiness_replay_plan_id"
+        )
+    if m.verification_batch_report_id is None:
+        raise ValueError("PLANNED status requires verification_batch_report_id")
+    if m.readiness.readiness_latest_batch_report_id != m.verification_batch_report_id:
+        raise ValueError(
+            "PLANNED status requires verification_batch_report_id to match "
+            "readiness.readiness_latest_batch_report_id"
+        )
+    if len(m.fingerprint_ids) != m.readiness.readiness_total_fingerprints:
+        raise ValueError(
+            "PLANNED status requires fingerprint_ids count to match "
+            "readiness_total_fingerprints"
+        )
+    if len(m.readiness.verified_fingerprint_ids) != m.readiness.readiness_total_fingerprints:
+        raise ValueError(
+            "PLANNED status requires verified_fingerprint_ids count to match "
+            "readiness_total_fingerprints"
+        )
+    if m.fingerprint_ids != m.readiness.verified_fingerprint_ids:
+        raise ValueError(
+            "PLANNED status requires fingerprint_ids to exactly match "
+            "readiness.verified_fingerprint_ids"
+        )
+    if m.created_at < m.readiness.readiness_checked_at:
+        raise ValueError(
+            "PLANNED status requires created_at >= readiness.readiness_checked_at"
+        )
+
+
+def _validate_manifest_status(m: ReplayRunManifest) -> None:
+    s = m.status
+    if s is ReplayRunManifestStatus.PLANNED:
+        _validate_planned_manifest(m)
+    elif (
+        s is ReplayRunManifestStatus.BLOCKED
+        and m.readiness.readiness_status is ReplayReadinessStatus.READY
+    ):
+        raise ValueError("BLOCKED status requires non-READY readiness_status")
+
+
+class ReplayRunManifest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    manifest_id: str
+    replay_plan_id: str
+    intent_kind: ReplayRunIntentKind
+    created_at: datetime
+    status: ReplayRunManifestStatus
+    readiness: ReplayRunReadinessBinding
+    fingerprint_ids: tuple[str, ...] = ()
+    verification_batch_report_id: str | None = None
+    notes: str | None = None
+
+    @field_validator("manifest_id", "replay_plan_id")
+    @classmethod
+    def _validate_id_fields(cls, v: str) -> str:
+        return _validate_required_text(v, "field")
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, v: datetime) -> datetime:
+        return ensure_aware_utc(v)
+
+    @field_validator("fingerprint_ids")
+    @classmethod
+    def _validate_fingerprint_ids(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        for fp_id in v:
+            _validate_required_text(fp_id, "fingerprint_id")
+        if len(v) != len(set(v)):
+            raise ValueError("duplicate fingerprint_id in fingerprint_ids")
+        return v
+
+    @field_validator("verification_batch_report_id")
+    @classmethod
+    def _validate_verification_batch_report_id(cls, v: str | None) -> str | None:
+        return _validate_optional_text(v, "verification_batch_report_id")
+
+    @field_validator("notes")
+    @classmethod
+    def _validate_notes(cls, v: str | None) -> str | None:
+        return _validate_optional_text(v, "notes")
+
+    @model_validator(mode="after")
+    def _validate_manifest(self) -> Self:
+        _validate_manifest_status(self)
         return self

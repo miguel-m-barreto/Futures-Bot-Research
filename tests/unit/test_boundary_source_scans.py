@@ -724,3 +724,91 @@ def test_replay_readiness_modules_do_not_import_execution_types() -> None:
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_replay_run_manifest_modules_do_not_import_forbidden_libs() -> None:
+    manifest_files = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+        ROOT / "tests/unit/test_replay_run_manifest_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_run_manifest_store.py",
+        ROOT / "tests/unit/test_local_replay_run_planner.py",
+        ROOT / "tests/unit/test_replay_run_manifest_flow.py",
+    )
+    forbidden = (
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "sqlalchemy",
+        "psycopg",
+        "confluent_kafka",
+        "aiokafka",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+    )
+    for path in manifest_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_run_manifest_modules_do_not_import_execution_types() -> None:
+    manifest_paths = (
+        ROOT / "src/futures_bot/replay/integrity.py",
+        ROOT / "tests/unit/test_replay_run_manifest_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_run_manifest_store.py",
+        ROOT / "tests/unit/test_local_replay_run_planner.py",
+        ROOT / "tests/unit/test_replay_run_manifest_flow.py",
+    )
+    forbidden_imports = (
+        "MetricObservation",
+        "EvaluationResultSet",
+    )
+    for path in manifest_paths:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden_imports:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )
+
+
+def test_replay_run_planner_does_not_use_file_io() -> None:
+    integrity_path = ROOT / "src/futures_bot/replay/integrity.py"
+    if not integrity_path.exists():
+        return
+    source = integrity_path.read_text(encoding="utf-8")
+    forbidden_patterns = (
+        "open(",
+        "write_text(",
+        "read_text(",
+        "pathlib",
+        "subprocess",
+        "threading",
+        "asyncio",
+    )
+    for pattern in forbidden_patterns:
+        assert pattern not in source, (
+            f"found forbidden pattern {pattern!r} in integrity.py"
+        )
+
+
+def test_replay_run_manifest_tests_do_not_read_docs() -> None:
+    manifest_test_files = (
+        ROOT / "tests/unit/test_replay_run_manifest_domain.py",
+        ROOT / "tests/unit/test_in_memory_replay_run_manifest_store.py",
+        ROOT / "tests/unit/test_local_replay_run_planner.py",
+        ROOT / "tests/unit/test_replay_run_manifest_flow.py",
+    )
+    forbidden_dir = "doc" + "s/"
+    for path in manifest_test_files:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        assert forbidden_dir not in source, f"found docs reference in {path.name}"

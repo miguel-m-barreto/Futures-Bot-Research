@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from futures_bot.domain.assets import StableCollateralAsset
 from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerificationBatchItem,
     ReplayArtifactFingerprintVerificationBatchReport,
@@ -55,7 +56,7 @@ def _instrument() -> ReplayInstrumentRef:
         venue="binance",
         symbol="BTCUSDT",
         market_type="stablecoin-collateral-futures",
-        settlement_asset="USDT",
+        settlement_asset=StableCollateralAsset("USDT"),
     )
 
 
@@ -245,11 +246,12 @@ class TestReplayReadinessFlow:
             fingerprint_id="fp-multi-1",
             verification_id="batch-multi:fp-multi-1:ver",
             verification_status=ReplayArtifactFingerprintVerificationStatus.MISMATCH,
+            issue_count=1,
         )
         summary = ReplayArtifactFingerprintVerificationBatchSummary(
             total_fingerprints=1,
             count_by_status={ReplayArtifactFingerprintVerificationStatus.MISMATCH: 1},
-            total_issues=0,
+            total_issues=1,
             all_valid=False,
             has_mismatches=True,
             has_missing=False,

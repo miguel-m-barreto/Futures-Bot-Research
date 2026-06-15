@@ -28,11 +28,15 @@ def _summary(  # noqa: PLR0913
     total_fps: int = 0,
     latest_batch_report_id: str | None = None,
     latest_batch_all_valid: bool | None = None,
+    latest_batch_total_fingerprints: int | None = None,
+    latest_batch_total_issues: int | None = None,
 ) -> ReplayReadinessSummary:
     return ReplayReadinessSummary(
         total_fingerprints=total_fps,
         latest_batch_report_id=latest_batch_report_id,
         latest_batch_all_valid=latest_batch_all_valid,
+        latest_batch_total_fingerprints=latest_batch_total_fingerprints,
+        latest_batch_total_issues=latest_batch_total_issues,
         blocking_issue_count=blocking,
         warning_issue_count=warning,
         info_issue_count=info,
@@ -74,6 +78,8 @@ def _ready_report(
             total_fps=2,
             latest_batch_report_id="b1",
             latest_batch_all_valid=True,
+            latest_batch_total_fingerprints=2,
+            latest_batch_total_issues=0,
         ),
     )
 
@@ -185,5 +191,35 @@ class TestInMemoryReplayReadinessReportStore:
                 "summary": bad_summary,
             }
         )
+        with pytest.raises((ValidationError, ValueError)):
+            store.save(tampered)
+
+    def test_model_copy_ready_latest_batch_total_fingerprints_none_rejected(self) -> None:
+        store = InMemoryReplayReadinessReportStore()
+        r = _ready_report()
+        store.save(r)
+        bad_summary = r.summary.model_copy(
+            update={"latest_batch_total_fingerprints": None}
+        )
+        tampered = r.model_copy(
+            update={"report_id": "rpt-tamper-none", "summary": bad_summary}
+        )
+
+        with pytest.raises((ValidationError, ValueError)):
+            store.save(tampered)
+
+    def test_model_copy_ready_latest_batch_total_fingerprints_mismatch_rejected(
+        self,
+    ) -> None:
+        store = InMemoryReplayReadinessReportStore()
+        r = _ready_report()
+        store.save(r)
+        bad_summary = r.summary.model_copy(
+            update={"latest_batch_total_fingerprints": 1}
+        )
+        tampered = r.model_copy(
+            update={"report_id": "rpt-tamper-mismatch", "summary": bad_summary}
+        )
+
         with pytest.raises((ValidationError, ValueError)):
             store.save(tampered)

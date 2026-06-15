@@ -30,6 +30,10 @@ from futures_bot.domain.replay import (
     ReplayReadinessReport,
     ReplayReadinessStatus,
     ReplayReadinessSummary,
+    ReplayRunIntentKind,
+    ReplayRunManifest,
+    ReplayRunManifestStatus,
+    ReplayRunReadinessBinding,
     ReplayTimelineCoverageIssueSeverity,
 )
 from futures_bot.ports.replay import (
@@ -37,6 +41,7 @@ from futures_bot.ports.replay import (
     ReplayArtifactFingerprintVerificationBatchReportStorePort,
     ReplayArtifactFingerprintVerificationStorePort,
     ReplayReadinessReportStorePort,
+    ReplayRunManifestStorePort,
     ReplayTimelineCoverageDiffStorePort,
     ReplayTimelineCoverageReportStorePort,
     ReplayTimelineStorePort,
@@ -737,3 +742,267 @@ class LocalReplayReadinessChecker:
         self, replay_plan_id: str
     ) -> tuple[ReplayReadinessReport, ...]:
         return self._readiness_report_store.list_for_replay_plan(replay_plan_id)
+
+
+class LocalReplayRunPlanner:
+    """Metadata-only replay run planner.
+
+    Creates a ReplayRunManifest from a READY readiness report.
+    No replay execution. No file IO. No DB. No Kafka.
+    """
+
+    def __init__(
+        self,
+        *,
+        readiness_report_store: ReplayReadinessReportStorePort,
+        fingerprint_store: ReplayArtifactFingerprintStorePort,
+        batch_report_store: ReplayArtifactFingerprintVerificationBatchReportStorePort,
+        run_manifest_store: ReplayRunManifestStorePort,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._readiness_report_store = readiness_report_store
+        self._fingerprint_store = fingerprint_store
+        self._batch_report_store = batch_report_store
+        self._run_manifest_store = run_manifest_store
+        self._now: Callable[[], datetime] = now if now is not None else _utcnow
+
+    def _load_referenced_batch(
+        self,
+        batch_report_id: str | None,
+    ) -> ReplayArtifactFingerprintVerificationBatchReport | None:
+        if batch_report_id is None:
+            return None
+        return self._batch_report_store.load(batch_report_id)
+
+    def _validate_ready_batch_identity(
+        self,
+        batch: ReplayArtifactFingerprintVerificationBatchReport,
+        batch_report_id: str,
+        readiness: ReplayReadinessReport,
+    ) -> None:
+        if batch.report_id != batch_report_id:
+            raise ValueError(
+                "referenced verification batch report id does not match readiness"
+            )
+        if batch.replay_plan_id != readiness.replay_plan_id:
+            raise ValueError(
+                "referenced verification batch report belongs to another replay plan"
+            )
+        if batch.status is not ReplayArtifactFingerprintVerificationBatchReportStatus.GENERATED:
+            raise ValueError("referenced verification batch report is not GENERATED")
+
+    def _validate_ready_batch_summary(
+        self,
+        batch: ReplayArtifactFingerprintVerificationBatchReport,
+        readiness: ReplayReadinessReport,
+    ) -> None:
+        if batch.summary.all_valid is not True:
+            raise ValueError("referenced verification batch report is not all valid")
+        if batch.summary.has_mismatches:
+            raise ValueError("referenced verification batch report has mismatches")
+        if batch.summary.has_missing:
+            raise ValueError("referenced verification batch report has missing artifacts")
+        if batch.summary.total_issues != 0:
+            raise ValueError(
+                "referenced verification batch report must have zero issues"
+            )
+        if batch.summary.total_fingerprints != readiness.summary.total_fingerprints:
+            raise ValueError(
+                "referenced verification batch fingerprint count does not match readiness"
+            )
+        if readiness.summary.latest_batch_total_issues != batch.summary.total_issues:
+            raise ValueError(
+                "readiness latest batch issue count does not match referenced "
+                "verification batch"
+            )
+        if (
+            batch.summary.total_fingerprints
+            != readiness.summary.latest_batch_total_fingerprints
+        ):
+            raise ValueError(
+                "referenced verification batch fingerprint count does not match "
+                "readiness latest batch count"
+            )
+
+    def _validate_ready_batch_temporal(
+        self,
+        batch: ReplayArtifactFingerprintVerificationBatchReport,
+        readiness: ReplayReadinessReport,
+    ) -> None:
+        if batch.generated_at > readiness.checked_at:
+            raise ValueError(
+                "temporal inconsistency: verification batch generated after "
+                "readiness was checked"
+            )
+
+    def _require_ready_batch(
+        self,
+        readiness: ReplayReadinessReport,
+    ) -> ReplayArtifactFingerprintVerificationBatchReport:
+        batch_report_id = readiness.summary.latest_batch_report_id
+        if batch_report_id is None:
+            raise ValueError("READY readiness requires latest_batch_report_id")
+        batch = self._load_referenced_batch(batch_report_id)
+        if batch is None:
+            raise ValueError(
+                f"readiness references missing verification batch report: "
+                f"{batch_report_id!r}"
+            )
+        self._validate_ready_batch_identity(batch, batch_report_id, readiness)
+        self._validate_ready_batch_summary(batch, readiness)
+        self._validate_ready_batch_temporal(batch, readiness)
+        if not batch.requested_fingerprint_ids:
+            raise ValueError("READY readiness requires non-empty verified fingerprint ids")
+        return batch
+
+    def _verified_ids_for_blocked(
+        self,
+        readiness: ReplayReadinessReport,
+    ) -> tuple[str, ...]:
+        batch = self._load_referenced_batch(readiness.summary.latest_batch_report_id)
+        if batch is None or batch.replay_plan_id != readiness.replay_plan_id:
+            return ()
+        return batch.requested_fingerprint_ids
+
+    def _make_readiness_binding(
+        self,
+        readiness: ReplayReadinessReport,
+        verified_fingerprint_ids: tuple[str, ...],
+    ) -> ReplayRunReadinessBinding:
+        return ReplayRunReadinessBinding(
+            readiness_report_id=readiness.report_id,
+            readiness_replay_plan_id=readiness.replay_plan_id,
+            readiness_status=readiness.status,
+            readiness_checked_at=readiness.checked_at,
+            readiness_total_fingerprints=readiness.summary.total_fingerprints,
+            readiness_latest_batch_report_id=readiness.summary.latest_batch_report_id,
+            verified_fingerprint_ids=verified_fingerprint_ids,
+        )
+
+    def _plan_ready_manifest(  # noqa: PLR0913
+        self,
+        manifest_id: str,
+        readiness: ReplayReadinessReport,
+        binding: ReplayRunReadinessBinding,
+        batch: ReplayArtifactFingerprintVerificationBatchReport,
+        intent_kind: ReplayRunIntentKind,
+        notes: str | None,
+    ) -> ReplayRunManifest:
+        verified_fingerprint_ids = batch.requested_fingerprint_ids
+        if readiness.summary.latest_batch_total_fingerprints is None:
+            raise ValueError(
+                "readiness report is READY but latest_batch_total_fingerprints is None; "
+                "cannot create a consistent PLANNED manifest"
+            )
+        if (
+            readiness.summary.latest_batch_total_fingerprints
+            != readiness.summary.total_fingerprints
+        ):
+            raise ValueError(
+                f"readiness report is READY but latest_batch_total_fingerprints "
+                f"({readiness.summary.latest_batch_total_fingerprints}) != "
+                f"total_fingerprints ({readiness.summary.total_fingerprints})"
+            )
+        fingerprints = self._fingerprint_store.list_for_replay_plan(readiness.replay_plan_id)
+        current_fingerprint_ids = tuple(fp.fingerprint_id for fp in fingerprints)
+        if not current_fingerprint_ids:
+            raise ValueError(
+                f"readiness report is READY but no fingerprints found for "
+                f"replay_plan_id={readiness.replay_plan_id!r}"
+            )
+        if len(current_fingerprint_ids) != readiness.summary.total_fingerprints:
+            raise ValueError(
+                f"readiness is stale or fingerprint count changed: "
+                f"store has {len(current_fingerprint_ids)} fingerprint(s) but readiness "
+                f"reports {readiness.summary.total_fingerprints}"
+            )
+        if current_fingerprint_ids != verified_fingerprint_ids:
+            raise ValueError(
+                "readiness is stale or fingerprint identity changed: current "
+                "fingerprint store snapshot does not exactly match the referenced "
+                "verification batch"
+            )
+        for fingerprint in fingerprints:
+            if fingerprint.generated_at > batch.generated_at:
+                raise ValueError(
+                    "temporal inconsistency: fingerprint "
+                    f"{fingerprint.fingerprint_id!r} was generated after the "
+                    "referenced verification batch"
+                )
+        created_at = self._now()
+        if created_at < readiness.checked_at:
+            raise ValueError(
+                "temporal inconsistency: manifest would be created before "
+                "readiness was checked"
+            )
+        return ReplayRunManifest(
+            manifest_id=manifest_id,
+            replay_plan_id=readiness.replay_plan_id,
+            intent_kind=intent_kind,
+            created_at=created_at,
+            status=ReplayRunManifestStatus.PLANNED,
+            readiness=binding,
+            fingerprint_ids=verified_fingerprint_ids,
+            verification_batch_report_id=readiness.summary.latest_batch_report_id,
+            notes=notes,
+        )
+
+    def _plan_blocked_manifest(
+        self,
+        manifest_id: str,
+        readiness: ReplayReadinessReport,
+        binding: ReplayRunReadinessBinding,
+        intent_kind: ReplayRunIntentKind,
+        notes: str | None,
+    ) -> ReplayRunManifest:
+        fingerprints = self._fingerprint_store.list_for_replay_plan(readiness.replay_plan_id)
+        created_at = self._now()
+        return ReplayRunManifest(
+            manifest_id=manifest_id,
+            replay_plan_id=readiness.replay_plan_id,
+            intent_kind=intent_kind,
+            created_at=created_at,
+            status=ReplayRunManifestStatus.BLOCKED,
+            readiness=binding,
+            fingerprint_ids=tuple(fp.fingerprint_id for fp in fingerprints),
+            verification_batch_report_id=readiness.summary.latest_batch_report_id,
+            notes=notes,
+        )
+
+    def plan_replay_run(
+        self,
+        manifest_id: str,
+        readiness_report_id: str,
+        intent_kind: ReplayRunIntentKind = ReplayRunIntentKind.REPLAY_ONLY,
+        notes: str | None = None,
+    ) -> ReplayRunManifest:
+        readiness = self._readiness_report_store.load(readiness_report_id)
+        if readiness is None:
+            raise ValueError(f"readiness report not found: {readiness_report_id!r}")
+        verified_fingerprint_ids: tuple[str, ...] = ()
+        batch: ReplayArtifactFingerprintVerificationBatchReport | None = None
+        if readiness.status is ReplayReadinessStatus.READY:
+            batch = self._require_ready_batch(readiness)
+            verified_fingerprint_ids = batch.requested_fingerprint_ids
+        else:
+            verified_fingerprint_ids = self._verified_ids_for_blocked(readiness)
+        binding = self._make_readiness_binding(readiness, verified_fingerprint_ids)
+        if readiness.status is ReplayReadinessStatus.READY:
+            assert batch is not None
+            manifest = self._plan_ready_manifest(
+                manifest_id, readiness, binding, batch, intent_kind, notes
+            )
+        else:
+            manifest = self._plan_blocked_manifest(
+                manifest_id, readiness, binding, intent_kind, notes
+            )
+        self._run_manifest_store.save(manifest)
+        return manifest
+
+    def load_manifest(self, manifest_id: str) -> ReplayRunManifest | None:
+        return self._run_manifest_store.load(manifest_id)
+
+    def manifests_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayRunManifest, ...]:
+        return self._run_manifest_store.list_for_replay_plan(replay_plan_id)

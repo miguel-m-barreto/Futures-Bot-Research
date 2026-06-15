@@ -12,6 +12,7 @@ from futures_bot.domain.replay import (
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayReadinessReport,
+    ReplayRunManifest,
     ReplayTimeline,
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
@@ -542,5 +543,49 @@ class InMemoryReplayReadinessReportStore:
             sorted(
                 self._reports.values(),
                 key=lambda r: (r.checked_at, r.report_id),
+            )
+        )
+
+
+class InMemoryReplayRunManifestStore:
+    """In-memory store for replay run manifests.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._manifests: dict[str, ReplayRunManifest] = {}
+
+    def save(self, manifest: ReplayRunManifest) -> None:
+        """Persist manifest; idempotent if identical, raises on conflict."""
+        revalidated = ReplayRunManifest.model_validate(manifest.model_dump())
+        existing = self._manifests.get(revalidated.manifest_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(f"manifest_id conflict for {revalidated.manifest_id!r}")
+            return
+        self._manifests[revalidated.manifest_id] = revalidated
+
+    def load(self, manifest_id: str) -> ReplayRunManifest | None:
+        """Return manifest by manifest_id, or None."""
+        return self._manifests.get(manifest_id)
+
+    def list_for_replay_plan(
+        self, replay_plan_id: str
+    ) -> tuple[ReplayRunManifest, ...]:
+        """Return manifests where replay_plan_id matches, in deterministic order."""
+        return tuple(
+            sorted(
+                (m for m in self._manifests.values() if m.replay_plan_id == replay_plan_id),
+                key=lambda m: (m.created_at, m.manifest_id),
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayRunManifest, ...]:
+        """Return all manifests sorted by created_at then manifest_id."""
+        return tuple(
+            sorted(
+                self._manifests.values(),
+                key=lambda m: (m.created_at, m.manifest_id),
             )
         )

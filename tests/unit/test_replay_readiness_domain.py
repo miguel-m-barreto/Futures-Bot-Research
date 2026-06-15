@@ -208,6 +208,8 @@ class TestReplayReadinessReportReady:
         r = _ready_report()
         assert r.status is ReplayReadinessStatus.READY
         assert r.issues == ()
+        assert r.summary.latest_batch_total_fingerprints == 2
+        assert r.summary.latest_batch_total_issues == 0
 
     def test_ready_with_issue_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -280,6 +282,120 @@ class TestReplayReadinessReportReady:
                     latest_batch_all_valid=None,
                 ),
             )
+
+    def test_ready_latest_batch_total_fingerprints_none_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="latest_batch_total_fingerprints"):
+            ReplayReadinessReport(
+                report_id="rpt-1",
+                replay_plan_id="plan-1",
+                checked_at=_TS,
+                status=ReplayReadinessStatus.READY,
+                summary=_summary(
+                    total_fingerprints=2,
+                    latest_batch_report_id="b1",
+                    latest_batch_all_valid=True,
+                    latest_batch_total_fingerprints=None,
+                    latest_batch_total_issues=0,
+                ),
+            )
+
+    def test_ready_latest_batch_total_fingerprints_lower_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="latest_batch_total_fingerprints"):
+            ReplayReadinessReport(
+                report_id="rpt-1",
+                replay_plan_id="plan-1",
+                checked_at=_TS,
+                status=ReplayReadinessStatus.READY,
+                summary=_summary(
+                    total_fingerprints=2,
+                    latest_batch_report_id="b1",
+                    latest_batch_all_valid=True,
+                    latest_batch_total_fingerprints=1,
+                    latest_batch_total_issues=0,
+                ),
+            )
+
+    def test_ready_latest_batch_total_fingerprints_higher_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="latest_batch_total_fingerprints"):
+            ReplayReadinessReport(
+                report_id="rpt-1",
+                replay_plan_id="plan-1",
+                checked_at=_TS,
+                status=ReplayReadinessStatus.READY,
+                summary=_summary(
+                    total_fingerprints=2,
+                    latest_batch_report_id="b1",
+                    latest_batch_all_valid=True,
+                    latest_batch_total_fingerprints=3,
+                    latest_batch_total_issues=0,
+                ),
+            )
+
+    def test_ready_latest_batch_total_fingerprints_exact_accepted(self) -> None:
+        r = ReplayReadinessReport(
+            report_id="rpt-1",
+            replay_plan_id="plan-1",
+            checked_at=_TS,
+            status=ReplayReadinessStatus.READY,
+            summary=_summary(
+                total_fingerprints=2,
+                latest_batch_report_id="b1",
+                latest_batch_all_valid=True,
+                latest_batch_total_fingerprints=2,
+                latest_batch_total_issues=0,
+            ),
+        )
+
+        assert r.status is ReplayReadinessStatus.READY
+
+    def test_ready_latest_batch_total_issues_none_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="latest_batch_total_issues"):
+            ReplayReadinessReport(
+                report_id="rpt-1",
+                replay_plan_id="plan-1",
+                checked_at=_TS,
+                status=ReplayReadinessStatus.READY,
+                summary=_summary(
+                    total_fingerprints=1,
+                    latest_batch_report_id="b1",
+                    latest_batch_all_valid=True,
+                    latest_batch_total_fingerprints=1,
+                    latest_batch_total_issues=None,
+                ),
+            )
+
+    def test_ready_latest_batch_total_issues_positive_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="latest_batch_total_issues"):
+            ReplayReadinessReport(
+                report_id="rpt-1",
+                replay_plan_id="plan-1",
+                checked_at=_TS,
+                status=ReplayReadinessStatus.READY,
+                summary=_summary(
+                    total_fingerprints=1,
+                    latest_batch_report_id="b1",
+                    latest_batch_all_valid=True,
+                    latest_batch_total_fingerprints=1,
+                    latest_batch_total_issues=1,
+                ),
+            )
+
+    def test_ready_latest_batch_total_issues_zero_accepted(self) -> None:
+        r = ReplayReadinessReport(
+            report_id="rpt-1",
+            replay_plan_id="plan-1",
+            checked_at=_TS,
+            status=ReplayReadinessStatus.READY,
+            summary=_summary(
+                total_fingerprints=1,
+                latest_batch_report_id="b1",
+                latest_batch_all_valid=True,
+                latest_batch_total_fingerprints=1,
+                latest_batch_total_issues=0,
+            ),
+        )
+
+        assert r.status is ReplayReadinessStatus.READY
 
 
 class TestReplayReadinessReportWarning:
@@ -469,5 +585,5 @@ class TestReplayReadinessReportValidation:
                 checked_at=_TS,
                 status=ReplayReadinessStatus.INVALIDATED,
                 summary=_summary(),
-                extra_field="x",
+                extra_field="x",  # type: ignore[call-arg]
             )
