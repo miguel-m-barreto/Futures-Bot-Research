@@ -116,6 +116,18 @@ def test_market_annotation_set_rejects_mismatched_instruments_and_duplicates() -
         MarketAnnotationSet(instrument="BTC/USDT", annotations=(annotation, annotation))
 
 
+def test_market_annotations_normalize_alternate_external_spellings() -> None:
+    annotation = MarketAnnotation(
+        instrument="BTC/USD",
+        kind=MarketAnnotationKind.LOW_MARKET_CAP,
+        source="scanner",
+    )
+    annotations = MarketAnnotationSet(instrument="BTCUSD", annotations=(annotation,))
+
+    assert annotations.instrument == annotation.instrument
+    assert str(annotations.instrument) == "BTC/USD"
+
+
 def test_market_annotation_set_lookup_methods() -> None:
     volatility = MarketAnnotation(
         instrument="BTC/USDT",
@@ -134,3 +146,19 @@ def test_market_annotation_set_lookup_methods() -> None:
         {MarketAnnotationKind.HIGH_VOLATILITY, MarketAnnotationKind.RSI_OVERBOUGHT},
     )
     assert annotations.by_kind(MarketAnnotationKind.RSI_OVERBOUGHT) == (rsi,)
+
+
+def test_market_annotation_models_model_dump_round_trip_and_tampering() -> None:
+    annotation = MarketAnnotation(
+        instrument="BTCUSD",
+        kind=MarketAnnotationKind.HIGH_VOLATILITY,
+        source="scanner",
+    )
+    annotations = MarketAnnotationSet(instrument="BTC/USD", annotations=(annotation,))
+
+    assert MarketAnnotation.model_validate(annotation.model_dump()) == annotation
+    assert MarketAnnotationSet.model_validate(annotations.model_dump()) == annotations
+
+    tampered = annotation.model_copy(update={"instrument": {"value": "BTCUSD"}})
+    with pytest.raises(ValidationError):
+        MarketAnnotationSet(instrument="BTC/USD", annotations=(tampered,))

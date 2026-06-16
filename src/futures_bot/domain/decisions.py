@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -7,9 +8,9 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.assets import AssetAmount
+from futures_bot.domain.assets import AssetAmount, AssetSymbol
 from futures_bot.domain.ids import BotId, CandidateId, DecisionIntentId
-from futures_bot.domain.instruments import InstrumentSymbol
+from futures_bot.domain.instruments import InstrumentSymbol, normalize_instrument_symbol
 from futures_bot.domain.time import ensure_aware_utc
 
 
@@ -66,6 +67,29 @@ class DecisionIntent(BaseModel):
     confidence: Decimal | None = None
     reason_tags: tuple[str, ...] = ()
     status: DecisionIntentStatus = DecisionIntentStatus.PROPOSED
+
+    @field_validator("proposed_margin", mode="before")
+    @classmethod
+    def _coerce_proposed_margin(cls, value: object) -> AssetAmount | None:
+        if value is None:
+            return None
+        if isinstance(value, AssetAmount):
+            if not isinstance(value.asset, AssetSymbol):
+                raise ValueError(
+                    "existing AssetAmount has a corrupted asset field: "
+                    f"expected AssetSymbol, got {type(value.asset).__name__}"
+                )
+            if not isinstance(value.amount, Decimal):
+                raise ValueError(
+                    "existing AssetAmount has a corrupted amount field: "
+                    f"expected Decimal, got {type(value.amount).__name__}"
+                )
+            return AssetAmount.model_validate(value.model_dump(mode="json"))
+        if isinstance(value, Mapping):
+            return AssetAmount.model_validate(value)
+        raise ValueError(
+            "proposed_margin must be an AssetAmount, serialized mapping, or None"
+        )
 
     @field_validator("instrument", mode="before")
     @classmethod
@@ -218,11 +242,11 @@ class RejectedCandidate(BaseModel):
 
 
 def _coerce_instrument(value: object) -> InstrumentSymbol:
-    if isinstance(value, InstrumentSymbol):
-        return value
-    if isinstance(value, str):
-        return InstrumentSymbol(value)
-    raise ValueError("instrument must be an InstrumentSymbol or string")
+    if not isinstance(value, str | InstrumentSymbol | Mapping):
+        raise ValueError(
+            "instrument must be an InstrumentSymbol, string, or serialized mapping"
+        )
+    return normalize_instrument_symbol(value)
 
 
 def _trimmed(value: str, field_name: str) -> str:

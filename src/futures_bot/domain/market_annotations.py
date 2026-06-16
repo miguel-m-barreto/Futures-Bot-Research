@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.instruments import InstrumentSymbol
+from futures_bot.domain.instruments import InstrumentSymbol, normalize_instrument_symbol
 
 
 class MarketAnnotationKind(StrEnum):
@@ -78,6 +79,20 @@ class MarketAnnotationSet(BaseModel):
     def _coerce_instrument(cls, value: object) -> InstrumentSymbol:
         return _coerce_instrument(value)
 
+    @field_validator("annotations", mode="before")
+    @classmethod
+    def _revalidate_annotations(cls, value: object) -> tuple[MarketAnnotation, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, tuple | list):
+            raise ValueError("annotations must be a tuple or list")
+        return tuple(
+            MarketAnnotation.model_validate(
+                item.model_dump() if isinstance(item, MarketAnnotation) else item
+            )
+            for item in value
+        )
+
     @model_validator(mode="after")
     def _validate_annotations(self) -> Self:
         seen: set[tuple[MarketAnnotationKind, str]] = set()
@@ -101,11 +116,11 @@ class MarketAnnotationSet(BaseModel):
 
 
 def _coerce_instrument(value: object) -> InstrumentSymbol:
-    if isinstance(value, InstrumentSymbol):
-        return value
-    if isinstance(value, str):
-        return InstrumentSymbol(value)
-    raise ValueError("instrument must be an InstrumentSymbol or string")
+    if not isinstance(value, str | InstrumentSymbol | Mapping):
+        raise ValueError(
+            "instrument must be an InstrumentSymbol, string, or serialized mapping"
+        )
+    return normalize_instrument_symbol(value)
 
 
 def _trimmed(value: str, field_name: str) -> str:

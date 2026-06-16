@@ -68,6 +68,14 @@ def test_evidence_set_rejects_mismatched_instruments_and_duplicate_ids() -> None
         EvidenceSet(instrument="BTC/USDT", evidence=(evidence, evidence))
 
 
+def test_evidence_models_normalize_alternate_external_spellings() -> None:
+    evidence = _evidence("evidence-1", instrument="BTCUSD")
+    evidence_set = EvidenceSet(instrument="btc-usd", evidence=(evidence,))
+
+    assert evidence_set.instrument == evidence.instrument
+    assert str(evidence_set.instrument) == "BTC/USD"
+
+
 def test_technical_evidence_invalid_instrument_type_raises_validation_error() -> None:
     with pytest.raises(ValidationError):
         TechnicalEvidence(
@@ -107,3 +115,15 @@ def test_evidence_set_lookup_methods() -> None:
     assert evidence_set.directions() == frozenset(
         {EvidenceDirection.LONG, EvidenceDirection.NEUTRAL},
     )
+
+
+def test_evidence_models_model_dump_round_trip_and_tampering() -> None:
+    evidence = _evidence("evidence-1", instrument="BTCUSD")
+    evidence_set = EvidenceSet(instrument="BTC/USD", evidence=(evidence,))
+
+    assert TechnicalEvidence.model_validate(evidence.model_dump()) == evidence
+    assert EvidenceSet.model_validate(evidence_set.model_dump()) == evidence_set
+
+    tampered = evidence.model_copy(update={"instrument": {"value": "btcusd"}})
+    with pytest.raises(ValidationError):
+        EvidenceSet(instrument="BTC/USD", evidence=(tampered,))

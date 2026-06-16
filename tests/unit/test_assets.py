@@ -7,7 +7,9 @@ from futures_bot.domain.assets import (
     AssetAmount,
     AssetDelta,
     AssetSymbol,
+    ConversionRateSnapshot,
     StableCollateralAsset,
+    _strict_stable_collateral_input,
 )
 
 
@@ -26,6 +28,84 @@ def test_stable_collateral_accepts_usdt_and_usdc_only() -> None:
     for value in ["ETH", "BTC", "BNB", "SOL", "USD"]:
         with pytest.raises(ValidationError):
             StableCollateralAsset(value)
+
+
+@pytest.mark.parametrize("symbol", ["USDT", "USDC"])
+def test_stable_collateral_model_dump_round_trip(symbol: str) -> None:
+    stable = StableCollateralAsset(symbol)
+
+    assert StableCollateralAsset.model_validate(stable.model_dump()) == stable
+    assert StableCollateralAsset.model_validate(
+        {"symbol": {"value": symbol}}
+    ) == stable
+
+
+def test_asset_models_model_dump_round_trip_with_nested_asset_symbols() -> None:
+    amount = AssetAmount(asset=StableCollateralAsset("USDT"), amount="1.0000")
+    delta = AssetDelta(asset=StableCollateralAsset("USDT"), amount="-1.0000")
+    rate = ConversionRateSnapshot(
+        source_asset=AssetSymbol("USDT"),
+        target_asset=AssetSymbol("USDC"),
+        rate="1.0000",
+        source="fixture",
+        snapshot_id="snapshot-1",
+    )
+
+    assert AssetAmount.model_validate(amount.model_dump()) == amount
+    assert AssetDelta.model_validate(delta.model_dump()) == delta
+    assert ConversionRateSnapshot.model_validate(rate.model_dump()) == rate
+    assert amount.asset == AssetSymbol("USDT")
+    assert delta.asset == AssetSymbol("USDT")
+
+
+def test_stable_collateral_rejects_tampered_nested_asset_symbol() -> None:
+    bad_symbol = AssetSymbol("USDT").model_copy(update={"value": "bad!"})
+    bad_stable = StableCollateralAsset("USDT").model_copy(update={"symbol": bad_symbol})
+
+    with pytest.raises(ValidationError):
+        StableCollateralAsset(bad_symbol)
+    with pytest.raises(ValidationError):
+        StableCollateralAsset.model_validate(bad_stable.model_dump())
+    with pytest.raises(ValidationError):
+        AssetAmount(asset=bad_stable, amount="1")
+    with pytest.raises(ValidationError):
+        AssetDelta(asset=bad_stable, amount="1")
+
+
+def test_conversion_rate_snapshot_rejects_tampered_asset_symbols() -> None:
+    bad_symbol = AssetSymbol("USDT").model_copy(update={"value": "bad!"})
+
+    with pytest.raises(ValidationError):
+        ConversionRateSnapshot(
+            source_asset=bad_symbol,
+            target_asset="USDC",
+            rate="1",
+            source="fixture",
+            snapshot_id="snapshot-1",
+        )
+    with pytest.raises(ValidationError):
+        ConversionRateSnapshot(
+            source_asset="USDT",
+            target_asset=bad_symbol,
+            rate="1",
+            source="fixture",
+            snapshot_id="snapshot-1",
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        {"value": "usdt"},
+        {"value": "bad!"},
+        {"value": "USDT", "extra": "x"},
+        {},
+        object(),
+    ),
+)
+def test_canonical_asset_symbol_mappings_are_strict(value: object) -> None:
+    with pytest.raises(ValidationError):
+        AssetAmount(asset=value, amount="1")
 
 
 def test_asset_amount_rejects_float_input() -> None:
@@ -168,3 +248,110 @@ def test_asset_amount_whitespace_string_raises_validation_error(bad: str) -> Non
 def test_asset_amount_non_finite_string_raises_validation_error(bad: str) -> None:
     with pytest.raises(ValidationError):
         AssetAmount(asset="USDT", amount=bad)
+
+
+# ---------------------------------------------------------------------------
+# _strict_stable_collateral_input helper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("symbol", ["USDT", "USDC"])
+def test_strict_stable_collateral_input_accepts_valid_wrappers(symbol: str) -> None:
+    original = StableCollateralAsset(symbol)
+    result = _strict_stable_collateral_input(original)
+    assert str(result) == symbol
+    assert isinstance(result, StableCollateralAsset)
+    assert isinstance(result.symbol, AssetSymbol)
+
+
+@pytest.mark.parametrize("bad_value", ["USD", "BTC", "ETH"])
+def test_strict_stable_collateral_input_rejects_corrupted_symbol_to_non_stable(
+    bad_value: str,
+) -> None:
+    bad_stable = StableCollateralAsset("USDT").model_copy(
+        update={"symbol": AssetSymbol(bad_value)}
+    )
+    with pytest.raises(ValueError):
+        _strict_stable_collateral_input(bad_stable)
+
+
+def test_strict_stable_collateral_input_rejects_corrupted_nested_asset_symbol() -> None:
+    bad_symbol = AssetSymbol("USDT").model_copy(update={"value": "bad!"})
+    bad_stable = StableCollateralAsset("USDT").model_copy(update={"symbol": bad_symbol})
+    with pytest.raises(ValueError):
+        _strict_stable_collateral_input(bad_stable)
+
+
+def test_strict_stable_collateral_input_rejects_raw_string_nested_state() -> None:
+    bad_stable = StableCollateralAsset("USDT").model_copy(update={"symbol": "USDT"})
+    with pytest.raises(ValueError, match="corrupted symbol"):
+        _strict_stable_collateral_input(bad_stable)
+
+
+def test_strict_stable_collateral_input_rejects_mapping_nested_state() -> None:
+    bad_stable = StableCollateralAsset("USDT").model_copy(
+        update={"symbol": {"value": "USDT"}}
+    )
+    with pytest.raises(ValueError, match="corrupted symbol"):
+        _strict_stable_collateral_input(bad_stable)
+
+
+# ---------------------------------------------------------------------------
+# Corrupted StableCollateralAsset wrappers rejected by accounting models
+# ---------------------------------------------------------------------------
+
+
+def _make_corrupted_wrappers() -> list[StableCollateralAsset]:
+    return [
+        StableCollateralAsset("USDT").model_copy(
+            update={"symbol": AssetSymbol("USD")}
+        ),
+        StableCollateralAsset("USDT").model_copy(
+            update={"symbol": AssetSymbol("BTC")}
+        ),
+        StableCollateralAsset("USDT").model_copy(
+            update={
+                "symbol": AssetSymbol("USDT").model_copy(update={"value": "bad!"})
+            }
+        ),
+        StableCollateralAsset("USDT").model_copy(update={"symbol": "USDT"}),
+        StableCollateralAsset("USDT").model_copy(
+            update={"symbol": {"value": "USDT"}}
+        ),
+    ]
+
+
+def test_corrupted_stable_collateral_wrapper_rejected_by_asset_amount() -> None:
+    for bad_stable in _make_corrupted_wrappers():
+        with pytest.raises(ValidationError):
+            AssetAmount(asset=bad_stable, amount="1")
+
+
+def test_corrupted_stable_collateral_wrapper_rejected_by_asset_delta() -> None:
+    for bad_stable in _make_corrupted_wrappers():
+        with pytest.raises(ValidationError):
+            AssetDelta(asset=bad_stable, amount="1")
+
+
+def test_corrupted_stable_collateral_wrapper_rejected_by_conversion_rate_snapshot_source() -> None:
+    for bad_stable in _make_corrupted_wrappers():
+        with pytest.raises(ValidationError):
+            ConversionRateSnapshot(
+                source_asset=bad_stable,
+                target_asset=AssetSymbol("USDC"),
+                rate="1",
+                source="fixture",
+                snapshot_id="snapshot-1",
+            )
+
+
+def test_corrupted_stable_collateral_wrapper_rejected_by_conversion_rate_snapshot_target() -> None:
+    for bad_stable in _make_corrupted_wrappers():
+        with pytest.raises(ValidationError):
+            ConversionRateSnapshot(
+                source_asset=AssetSymbol("USDT"),
+                target_asset=bad_stable,
+                rate="1",
+                source="fixture",
+                snapshot_id="snapshot-1",
+            )

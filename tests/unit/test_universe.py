@@ -8,7 +8,7 @@ from futures_bot.domain.market_annotations import (
     MarketAnnotationSet,
 )
 from futures_bot.domain.policies import UniversePolicyKind
-from futures_bot.domain.universe import UniversePolicySpec
+from futures_bot.domain.universe import UniverseEligibilityDecision, UniversePolicySpec
 
 
 def test_universe_policy_rejects_duplicate_and_conflicting_instruments() -> None:
@@ -25,6 +25,13 @@ def test_universe_policy_rejects_duplicate_and_conflicting_instruments() -> None
             policy_kind=UniversePolicyKind.BOT_RESTRICTED,
             allowed_instruments=("BTC/USDT",),
             blocked_instruments=("BTC/USDT",),
+        )
+
+    with pytest.raises(ValidationError, match="duplicate allowed"):
+        UniversePolicySpec(
+            policy_id=PolicyId("policy-1"),
+            policy_kind=UniversePolicyKind.BOT_RESTRICTED,
+            allowed_instruments=("BTCUSD", "BTC/USD"),
         )
 
 
@@ -63,6 +70,20 @@ def test_single_instrument_requires_exactly_one_allowed_instrument() -> None:
 
     assert policy.evaluate("SOL/USDC").eligible
     assert not policy.evaluate("BTC/USDT").eligible
+
+
+def test_universe_policy_normalizes_alternate_external_spellings() -> None:
+    policy = UniversePolicySpec(
+        policy_id=PolicyId("policy-1"),
+        policy_kind=UniversePolicyKind.BOT_RESTRICTED,
+        allowed_instruments=("BTCUSD",),
+        blocked_instruments=("ETH_USD",),
+    )
+
+    assert str(policy.allowed_instruments[0]) == "BTC/USD"
+    assert policy.evaluate("btc-usd").eligible
+    assert not policy.evaluate("ETH/USD").eligible
+    assert not policy.evaluate("BTCUSDT").eligible
 
 
 def test_research_universe_can_allow_low_cap_high_volatility_markets() -> None:
@@ -136,3 +157,20 @@ def test_universe_policy_rejects_missing_required_annotations() -> None:
     )
 
     assert not policy.evaluate("BTC/USDT").eligible
+
+
+def test_universe_models_model_dump_round_trip() -> None:
+    decision = UniverseEligibilityDecision(
+        instrument="BTCUSD",
+        eligible=True,
+        policy_kind=UniversePolicyKind.BOT_RESTRICTED,
+        reason="ok",
+    )
+    policy = UniversePolicySpec(
+        policy_id=PolicyId("policy-1"),
+        policy_kind=UniversePolicyKind.BOT_RESTRICTED,
+        allowed_instruments=("BTCUSD",),
+    )
+
+    assert UniverseEligibilityDecision.model_validate(decision.model_dump()) == decision
+    assert UniversePolicySpec.model_validate(policy.model_dump()) == policy

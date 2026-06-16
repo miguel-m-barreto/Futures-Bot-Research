@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Self
@@ -7,7 +8,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from futures_bot.domain.ids import EvidenceId
-from futures_bot.domain.instruments import InstrumentSymbol
+from futures_bot.domain.instruments import InstrumentSymbol, normalize_instrument_symbol
 
 
 class EvidenceSourceKind(StrEnum):
@@ -88,6 +89,20 @@ class EvidenceSet(BaseModel):
     def _coerce_instrument(cls, value: object) -> InstrumentSymbol:
         return _coerce_instrument(value)
 
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _revalidate_evidence(cls, value: object) -> tuple[TechnicalEvidence, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, tuple | list):
+            raise ValueError("evidence must be a tuple or list")
+        return tuple(
+            TechnicalEvidence.model_validate(
+                item.model_dump() if isinstance(item, TechnicalEvidence) else item
+            )
+            for item in value
+        )
+
     @model_validator(mode="after")
     def _validate_evidence(self) -> Self:
         seen: set[EvidenceId] = set()
@@ -107,11 +122,11 @@ class EvidenceSet(BaseModel):
 
 
 def _coerce_instrument(value: object) -> InstrumentSymbol:
-    if isinstance(value, InstrumentSymbol):
-        return value
-    if isinstance(value, str):
-        return InstrumentSymbol(value)
-    raise ValueError("instrument must be an InstrumentSymbol or string")
+    if not isinstance(value, str | InstrumentSymbol | Mapping):
+        raise ValueError(
+            "instrument must be an InstrumentSymbol, string, or serialized mapping"
+        )
+    return normalize_instrument_symbol(value)
 
 
 def _trimmed(value: str, field_name: str) -> str:

@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.assets import AssetAmount
+from futures_bot.domain.assets import AssetAmount, AssetSymbol, StableCollateralAsset
 from futures_bot.domain.decisions import (
     DecisionIntent,
     DecisionIntentStatus,
@@ -113,6 +113,56 @@ def test_decision_intent_validates_reason_tags_and_defaults_status() -> None:
         )
 
 
+def test_decision_models_normalize_external_instrument_symbols() -> None:
+    intent = DecisionIntent(**{**_base_intent_kwargs(), "instrument": "btcusd"})
+    no_trade = NoTradeDecision(
+        decision_intent_id=DecisionIntentId("intent-no-trade"),
+        bot_id=BotId("bot-1"),
+        instrument="BTCUSD",
+        source_kind=DecisionSourceKind.CONTROL_BASELINE,
+        source_id="baseline",
+        created_at=_created_at(),
+        reasons=(NoTradeReasonKind.CONTROL_BASELINE_NO_TRADE,),
+    )
+    rejected = RejectedCandidate(
+        candidate_id=CandidateId("candidate-1"),
+        bot_id=BotId("bot-1"),
+        instrument="btc-usd",
+        rejected_by="universe-policy",
+        reason="not eligible",
+        created_at=_created_at(),
+    )
+
+    assert str(intent.instrument) == "BTC/USD"
+    assert str(no_trade.instrument) == "BTC/USD"
+    assert str(rejected.instrument) == "BTC/USD"
+
+
+def test_decision_models_model_dump_round_trip() -> None:
+    intent = _intent()
+    no_trade = NoTradeDecision(
+        decision_intent_id=DecisionIntentId("intent-no-trade"),
+        bot_id=BotId("bot-1"),
+        instrument="BTCUSD",
+        source_kind=DecisionSourceKind.CONTROL_BASELINE,
+        source_id="baseline",
+        created_at=_created_at(),
+        reasons=(NoTradeReasonKind.CONTROL_BASELINE_NO_TRADE,),
+    )
+    rejected = RejectedCandidate(
+        candidate_id=CandidateId("candidate-1"),
+        bot_id=BotId("bot-1"),
+        instrument="btc-usd",
+        rejected_by="universe-policy",
+        reason="not eligible",
+        created_at=_created_at(),
+    )
+
+    assert DecisionIntent.model_validate(intent.model_dump()) == intent
+    assert NoTradeDecision.model_validate(no_trade.model_dump()) == no_trade
+    assert RejectedCandidate.model_validate(rejected.model_dump()) == rejected
+
+
 def test_no_trade_decision_requires_reasons_and_validates_confidence() -> None:
     no_trade = NoTradeDecision(
         decision_intent_id=DecisionIntentId("intent-1"),
@@ -216,3 +266,85 @@ def test_rejected_candidate_validates_text_and_timestamp() -> None:
             reason="not eligible",
             created_at=datetime(2026, 1, 1),
         )
+
+
+# ---------------------------------------------------------------------------
+# DecisionIntent proposed_margin tampering
+# ---------------------------------------------------------------------------
+
+
+def test_decision_intent_accepts_valid_existing_asset_amount() -> None:
+    valid_margin = AssetAmount(asset=StableCollateralAsset("USDT"), amount="100.0000")
+    intent = DecisionIntent(
+        **_base_intent_kwargs(),
+        proposed_margin=valid_margin,
+    )
+    assert intent.proposed_margin == AssetAmount(asset="USDT", amount="100.0000")
+    assert isinstance(intent.proposed_margin.asset, AssetSymbol)
+    assert isinstance(intent.proposed_margin.amount, Decimal)
+
+
+def test_decision_intent_accepts_none_margin() -> None:
+    intent = DecisionIntent(**_base_intent_kwargs())
+    assert intent.proposed_margin is None
+
+
+def test_decision_intent_rejects_asset_amount_with_corrupted_stable_collateral_asset() -> None:
+    bad_stable = StableCollateralAsset("USDT").model_copy(
+        update={"symbol": AssetSymbol("USD")}
+    )
+    bad_amount = AssetAmount(asset="USDT", amount="1").model_copy(
+        update={"asset": bad_stable}
+    )
+    with pytest.raises(ValidationError):
+        DecisionIntent(**_base_intent_kwargs(), proposed_margin=bad_amount)
+
+
+@pytest.mark.parametrize(
+    "corrupted_asset",
+    [
+        "USDT",
+        {"value": "USDT"},
+    ],
+)
+def test_decision_intent_rejects_asset_amount_with_non_asset_symbol_asset(
+    corrupted_asset: object,
+) -> None:
+    bad_amount = AssetAmount(asset="USDT", amount="1").model_copy(
+        update={"asset": corrupted_asset}
+    )
+    with pytest.raises(ValidationError):
+        DecisionIntent(**_base_intent_kwargs(), proposed_margin=bad_amount)
+
+
+@pytest.mark.parametrize(
+    "corrupted_amount",
+    [
+        "1",
+        1.0,
+        Decimal("-1"),
+        Decimal("Infinity"),
+    ],
+)
+def test_decision_intent_rejects_asset_amount_with_corrupted_amount(
+    corrupted_amount: object,
+) -> None:
+    bad_amount = AssetAmount(asset="USDT", amount="1").model_copy(
+        update={"amount": corrupted_amount}
+    )
+    with pytest.raises(ValidationError):
+        DecisionIntent(**_base_intent_kwargs(), proposed_margin=bad_amount)
+
+
+def test_decision_intent_rejects_asset_amount_with_invalid_asset_symbol() -> None:
+    bad_symbol = AssetSymbol("USDT").model_copy(update={"value": "bad!"})
+    bad_amount = AssetAmount(asset="USDT", amount="1").model_copy(
+        update={"asset": bad_symbol}
+    )
+    with pytest.raises(ValidationError):
+        DecisionIntent(**_base_intent_kwargs(), proposed_margin=bad_amount)
+
+
+def test_decision_intent_rejects_non_asset_amount_proposed_margin() -> None:
+    with pytest.raises(ValidationError):
+        DecisionIntent(**_base_intent_kwargs(), proposed_margin=object())  # type: ignore[arg-type]

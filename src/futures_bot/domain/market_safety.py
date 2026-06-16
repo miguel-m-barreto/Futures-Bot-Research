@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.instruments import InstrumentSymbol
+from futures_bot.domain.instruments import InstrumentSymbol, normalize_instrument_symbol
 
 
 class MarketSafetyBlockReason(StrEnum):
@@ -76,11 +77,11 @@ class MarketSafetyDecision(BaseModel):
 
 
 def _coerce_instrument(value: object) -> InstrumentSymbol:
-    if isinstance(value, InstrumentSymbol):
-        return value
-    if isinstance(value, str):
-        return InstrumentSymbol(value)
-    raise ValueError("instrument must be an InstrumentSymbol or string")
+    if not isinstance(value, str | InstrumentSymbol | Mapping):
+        raise ValueError(
+            "instrument must be an InstrumentSymbol, string, or serialized mapping"
+        )
+    return normalize_instrument_symbol(value)
 
 
 def _optional_trimmed(value: str | None, field_name: str) -> str | None:

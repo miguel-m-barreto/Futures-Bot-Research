@@ -5,9 +5,10 @@ from futures_bot.domain.market_safety import MarketSafetyBlockReason, MarketSafe
 
 
 def test_market_safety_allow_requires_no_block_reasons() -> None:
-    decision = MarketSafetyDecision.allow("BTC/USDT", notes="valid")
+    decision = MarketSafetyDecision.allow("BTCUSD", notes="valid")
 
     assert decision.allowed
+    assert str(decision.instrument) == "BTC/USD"
     assert decision.block_reasons == ()
 
     with pytest.raises(ValidationError, match="must not have block reasons"):
@@ -20,11 +21,12 @@ def test_market_safety_allow_requires_no_block_reasons() -> None:
 
 def test_market_safety_block_requires_reasons_and_rejects_duplicates() -> None:
     decision = MarketSafetyDecision.block(
-        "BTC/USDT",
+        "btc-usd",
         (MarketSafetyBlockReason.UNSAFE_ASSET, MarketSafetyBlockReason.NON_TRADABLE),
     )
 
     assert not decision.allowed
+    assert str(decision.instrument) == "BTC/USD"
 
     with pytest.raises(ValidationError, match="requires at least one"):
         MarketSafetyDecision(instrument="BTC/USDT", allowed=False)
@@ -62,3 +64,12 @@ def test_market_safety_reasons_do_not_include_strategy_annotations() -> None:
         "FUNDING_UNFAVORABLE",
     ):
         assert forbidden not in reason_names
+
+
+def test_market_safety_decision_model_dump_round_trip() -> None:
+    decision = MarketSafetyDecision.block(
+        "BTC_USD",
+        (MarketSafetyBlockReason.UNSAFE_ASSET,),
+    )
+
+    assert MarketSafetyDecision.model_validate(decision.model_dump()) == decision

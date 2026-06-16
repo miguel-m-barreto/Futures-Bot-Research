@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any, Self
 
@@ -42,6 +43,20 @@ class AssetSymbol(BaseModel):
         return f"AssetSymbol({self.value!r})"
 
 
+def _strict_asset_symbol_input(value: object) -> AssetSymbol:
+    if isinstance(value, AssetSymbol):
+        return AssetSymbol.model_validate(value.model_dump())
+    if isinstance(value, str):
+        return AssetSymbol(value)
+    if isinstance(value, Mapping):
+        if set(value) != {"value"}:
+            raise ValueError("serialized asset symbol must contain only value")
+        return AssetSymbol.model_validate(dict(value))
+    raise ValueError(
+        "asset symbol input must be an AssetSymbol, string, or canonical mapping"
+    )
+
+
 class StableCollateralAsset(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -58,12 +73,8 @@ class StableCollateralAsset(BaseModel):
     @classmethod
     def _coerce_symbol(cls, value: object) -> AssetSymbol:
         if isinstance(value, StableCollateralAsset):
-            return value.symbol
-        if isinstance(value, AssetSymbol):
-            return value
-        if isinstance(value, str):
-            return AssetSymbol(value)
-        raise ValueError("stable collateral asset must be an asset symbol")
+            return _strict_stable_collateral_input(value).symbol
+        return _strict_asset_symbol_input(value)
 
     @field_validator("symbol")
     @classmethod
@@ -81,6 +92,25 @@ class StableCollateralAsset(BaseModel):
 
     def __repr__(self) -> str:
         return f"StableCollateralAsset({str(self.symbol)!r})"
+
+
+def _strict_stable_collateral_input(
+    value: StableCollateralAsset,
+) -> StableCollateralAsset:
+    if not isinstance(value, StableCollateralAsset):
+        raise ValueError("expected an existing StableCollateralAsset instance")
+    if not isinstance(value.symbol, AssetSymbol):
+        raise ValueError(
+            "existing StableCollateralAsset has a corrupted symbol field: "
+            f"expected AssetSymbol, got {type(value.symbol).__name__}"
+        )
+    validated_symbol = _strict_asset_symbol_input(value.symbol)
+    try:
+        return StableCollateralAsset(validated_symbol)
+    except Exception as exc:
+        raise ValueError(
+            f"existing StableCollateralAsset failed allowlist check: {exc}"
+        ) from exc
 
 
 class RoundingPolicy(BaseModel):
@@ -243,12 +273,13 @@ class AssetDelta(BaseModel):
 
 def _coerce_asset_symbol(value: object) -> AssetSymbol:
     if isinstance(value, StableCollateralAsset):
-        return value.symbol
-    if isinstance(value, AssetSymbol):
-        return value
-    if isinstance(value, str):
-        return AssetSymbol(value)
-    raise ValueError("asset must be an AssetSymbol, StableCollateralAsset, or string")
+        return _strict_stable_collateral_input(value).symbol
+    if isinstance(value, AssetSymbol | str | Mapping):
+        return _strict_asset_symbol_input(value)
+    raise ValueError(
+        "asset must be an AssetSymbol, StableCollateralAsset, string, "
+        "or serialized mapping"
+    )
 
 
 def _coerce_decimal(value: object) -> Decimal:

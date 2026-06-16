@@ -246,6 +246,58 @@ def test_replay_ports_do_not_import_infrastructure() -> None:
     assert not any("infrastructure" in line for line in lines)
 
 
+def test_replay_decision_bridge_source_does_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/replay_decisions.py",
+        ROOT / "src/futures_bot/ports/decision.py",
+        ROOT / "src/futures_bot/decision/replay_adapter.py",
+        ROOT / "src/futures_bot/decision/journal.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "LocalJsonlWal",
+        "sidecars.local",
+        "decide_wal_gc",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "random",
+        "uuid",
+        "open(",
+        "write_text",
+        "RiskBehaviorModel",
+        "HardRiskGate",
+        "RiskGate",
+        "ExecutionIntent",
+        "OrderIntent",
+        "Fill",
+        "Ledger",
+        "EvaluationResultSet",
+        "MetricObservation",
+        "PnL",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_decision_port_does_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/decision.py")
+    assert not any("infrastructure" in line for line in lines)
+
+
 def test_replay_timeline_test_files_do_not_import_forbidden_dependencies() -> None:
     timeline_test_files = (
         ROOT / "tests/unit/test_replay_timeline_domain.py",
