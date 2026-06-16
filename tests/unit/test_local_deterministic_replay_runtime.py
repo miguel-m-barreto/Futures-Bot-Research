@@ -11,6 +11,11 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintStatus,
     ReplayArtifactHashAlgorithm,
     ReplayArtifactKind,
+    ReplayDispatchContext,
+    ReplayDispatchHandlerDescriptor,
+    ReplayEventDispatchPlan,
+    ReplayEventOutputRecord,
+    ReplayHandlerOutputProposal,
     ReplayInputKind,
     ReplayInstrumentRef,
     ReplayOrderingPolicy,
@@ -24,21 +29,28 @@ from futures_bot.domain.replay import (
     ReplayTimeline,
     ReplayTimelineEvent,
     ReplayTimelineStatus,
+    build_replay_dispatcher_fingerprint,
     build_replay_event_dispatch_receipt_id,
+    build_replay_event_output_record_id,
 )
 from futures_bot.domain.research import TemporalWindow, TemporalWindowKind
 from futures_bot.infrastructure.replay.in_memory import (
     InMemoryReplayArtifactFingerprintStore,
     InMemoryReplayEventDispatchReceiptStore,
+    InMemoryReplayEventOutputRecordStore,
     InMemoryReplayRunManifestStore,
     InMemoryReplayRunStateStore,
     InMemoryReplayTimelineStore,
 )
+from futures_bot.replay.dispatch import LocalDeterministicReplayDispatcher
 from futures_bot.replay.runtime import LocalDeterministicReplayRuntime
 
 
 def _utc(hour: int = 0) -> datetime:
     return datetime(2026, 1, 1, hour, tzinfo=UTC)
+
+
+EMPTY_DISPATCHER_FINGERPRINT = build_replay_dispatcher_fingerprint(())
 
 
 class _Clock:
@@ -59,6 +71,171 @@ class _SequenceClock:
         value = self._values[self.calls]
         self.calls += 1
         return value
+
+
+class _AuditHandler:
+    def __init__(
+        self,
+        handler_id: str,
+        *,
+        version: str = "1",
+        kinds: tuple[ReplayInputKind, ...] = (ReplayInputKind.MARK_PRICE,),
+        outputs: tuple[str, ...] = ('{"audit":"ok"}',),
+        fail_on_order_index: int | None = None,
+    ) -> None:
+        self.handler_id = handler_id
+        self.handler_version = version
+        self.supported_event_kinds = kinds
+        self.outputs = outputs
+        self.fail_on_order_index = fail_on_order_index
+        self.calls: list[int] = []
+
+    def handle(
+        self,
+        context: ReplayDispatchContext,
+        event: ReplayTimelineEvent,
+    ) -> tuple[ReplayHandlerOutputProposal, ...]:
+        self.calls.append(event.order_index)
+        if self.fail_on_order_index == event.order_index:
+            raise ValueError("handler failure")
+        return tuple(
+            ReplayHandlerOutputProposal(output_kind="audit", canonical_payload=payload)
+            for payload in self.outputs
+        )
+
+
+class _FlippingPlan:
+    def __init__(
+        self,
+        plan: ReplayEventDispatchPlan,
+        replacement_records: tuple[ReplayEventOutputRecord, ...],
+    ) -> None:
+        self.context = plan.context
+        self.handler_ids = plan.handler_ids
+        self.output_records = plan.output_records
+        self._replacement_records = replacement_records
+
+    def model_dump(self) -> dict[str, object]:
+        return {
+            "context": self.context.model_dump(),
+            "handler_ids": self.handler_ids,
+            "output_records": tuple(
+                record.model_dump() for record in self._replacement_records
+            ),
+        }
+
+
+class _FaultyDispatcher(LocalDeterministicReplayDispatcher):
+    def __init__(self, mode: str) -> None:
+        handlers = (_AuditHandler("handler-a"),)
+        if mode in {"unknown_handler", "wrong_order"}:
+            handlers = (_AuditHandler("handler-a"), _AuditHandler("handler-b"))
+        if mode == "unsupported_included":
+            handlers = (
+                _AuditHandler("handler-a"),
+                _AuditHandler("handler-z", kinds=(ReplayInputKind.TRADE,)),
+            )
+        super().__init__(handlers)
+        self.mode = mode
+
+    def plan_dispatch(  # noqa: PLR0911 - explicit faulty modes for runtime tests
+        self,
+        context: ReplayDispatchContext,
+        event: ReplayTimelineEvent,
+        dispatch_receipt_id: str,
+    ) -> ReplayEventDispatchPlan:
+        plan = super().plan_dispatch(context, event, dispatch_receipt_id)
+        record = plan.output_records[0]
+        if self.mode == "wrong_output_receipt":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=plan.handler_ids,
+                output_records=(
+                    record.model_copy(
+                        update={"dispatch_receipt_id": "replay-dispatch:" + "0" * 64}
+                    ),
+                ),
+            )
+        if self.mode == "handler_ids":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=("handler-other",),
+                output_records=plan.output_records,
+            )
+        if self.mode == "omitted_handler":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=(),
+                output_records=(),
+            )
+        if self.mode == "unknown_handler":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=("handler-a", "handler-z"),
+                output_records=plan.output_records,
+            )
+        if self.mode == "unsupported_included":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=("handler-a", "handler-z"),
+                output_records=plan.output_records,
+            )
+        if self.mode == "wrong_order":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=("handler-b", "handler-a"),
+                output_records=plan.output_records,
+            )
+        if self.mode == "wrong_version":
+            payload_sha256 = record.payload_sha256
+            output_record_id = build_replay_event_output_record_id(
+                run_id=record.run_id,
+                event_order_index=record.event_order_index,
+                event_id=record.event_id,
+                handler_id=record.handler_id,
+                handler_version="999",
+                handler_output_index=record.handler_output_index,
+                output_kind=record.output_kind,
+                payload_sha256=payload_sha256,
+            )
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context,
+                handler_ids=plan.handler_ids,
+                output_records=(
+                    record.model_copy(
+                        update={
+                            "handler_version": "999",
+                            "output_record_id": output_record_id,
+                        }
+                    ),
+                ),
+            )
+        if self.mode == "output_ids":
+            replacement = record.model_copy(
+                update={"output_record_id": "replay-output:" + "0" * 64}
+            )
+            return _FlippingPlan(plan, (replacement,))  # type: ignore[return-value]
+        if self.mode == "binding":
+            return ReplayEventDispatchPlan.model_construct(
+                context=plan.context.model_copy(update={"run_id": "run-other"}),
+                handler_ids=plan.handler_ids,
+                output_records=plan.output_records,
+            )
+        raise AssertionError(f"unknown faulty dispatcher mode {self.mode!r}")
+
+
+class _CorruptMetadataDispatcher(LocalDeterministicReplayDispatcher):
+    @property
+    def dispatcher_fingerprint(self) -> str:
+        return "replay-dispatcher:" + "0" * 64
+
+
+class _CorruptSelectionDispatcher(LocalDeterministicReplayDispatcher):
+    def selected_descriptors_for(
+        self,
+        event_kind: ReplayInputKind,
+    ) -> tuple[ReplayDispatchHandlerDescriptor, ...]:
+        return ()
 
 
 def _instrument() -> ReplayInstrumentRef:
@@ -213,6 +390,7 @@ def _runtime(
     fingerprint_store = InMemoryReplayArtifactFingerprintStore()
     run_store = InMemoryReplayRunStateStore()
     receipt_store = InMemoryReplayEventDispatchReceiptStore()
+    output_store = InMemoryReplayEventOutputRecordStore()
     if manifest is not None:
         manifest_store.save(manifest)
     if timeline is not None:
@@ -225,9 +403,69 @@ def _runtime(
         fingerprint_store=fingerprint_store,
         run_store=run_store,
         receipt_store=receipt_store,
+        dispatcher=LocalDeterministicReplayDispatcher(()),
+        output_store=output_store,
         now=clock,
     )
     return runtime, run_store, receipt_store
+
+
+def _runtime_with_dispatcher(
+    dispatcher: LocalDeterministicReplayDispatcher,
+    *,
+    clock: _Clock | _SequenceClock | None = None,
+) -> tuple[
+    LocalDeterministicReplayRuntime,
+    InMemoryReplayRunStateStore,
+    InMemoryReplayEventDispatchReceiptStore,
+    InMemoryReplayEventOutputRecordStore,
+]:
+    manifest_store = InMemoryReplayRunManifestStore()
+    timeline_store = InMemoryReplayTimelineStore()
+    fingerprint_store = InMemoryReplayArtifactFingerprintStore()
+    run_store = InMemoryReplayRunStateStore()
+    receipt_store = InMemoryReplayEventDispatchReceiptStore()
+    output_store = InMemoryReplayEventOutputRecordStore()
+    manifest_store.save(_manifest())
+    timeline_store.save(_timeline())
+    fingerprint_store.save(_fingerprint())
+    runtime = LocalDeterministicReplayRuntime(
+        manifest_store=manifest_store,
+        timeline_store=timeline_store,
+        fingerprint_store=fingerprint_store,
+        run_store=run_store,
+        receipt_store=receipt_store,
+        dispatcher=dispatcher,
+        output_store=output_store,
+        now=clock,
+    )
+    return runtime, run_store, receipt_store, output_store
+
+
+def _shared_runtime(
+    dispatcher: LocalDeterministicReplayDispatcher,
+    *,
+    run_store: InMemoryReplayRunStateStore,
+    receipt_store: InMemoryReplayEventDispatchReceiptStore,
+    output_store: InMemoryReplayEventOutputRecordStore,
+    clock: _SequenceClock | None = None,
+) -> LocalDeterministicReplayRuntime:
+    manifest_store = InMemoryReplayRunManifestStore()
+    timeline_store = InMemoryReplayTimelineStore()
+    fingerprint_store = InMemoryReplayArtifactFingerprintStore()
+    manifest_store.save(_manifest())
+    timeline_store.save(_timeline())
+    fingerprint_store.save(_fingerprint())
+    return LocalDeterministicReplayRuntime(
+        manifest_store=manifest_store,
+        timeline_store=timeline_store,
+        fingerprint_store=fingerprint_store,
+        run_store=run_store,
+        receipt_store=receipt_store,
+        dispatcher=dispatcher,
+        output_store=output_store,
+        now=clock,
+    )
 
 
 class _StaticRunStateStore:
@@ -259,6 +497,18 @@ class _StaticRunStateStore:
         return (self._state,)
 
 
+class _FailNextReplaceRunStateStore(InMemoryReplayRunStateStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_replace = False
+
+    def replace(self, state: ReplayRunState, expected_revision: int) -> None:
+        if self.fail_next_replace:
+            self.fail_next_replace = False
+            raise ValueError("simulated state CAS failure")
+        super().replace(state, expected_revision)
+
+
 def _runtime_with_loaded_state(
     state: ReplayRunState,
     *,
@@ -273,6 +523,7 @@ def _runtime_with_loaded_state(
     timeline_store = InMemoryReplayTimelineStore()
     fingerprint_store = InMemoryReplayArtifactFingerprintStore()
     receipt_store = InMemoryReplayEventDispatchReceiptStore()
+    output_store = InMemoryReplayEventOutputRecordStore()
     run_store = _StaticRunStateStore(state)
     manifest_store.save(_manifest())
     timeline_store.save(timeline)
@@ -283,6 +534,8 @@ def _runtime_with_loaded_state(
         fingerprint_store=fingerprint_store,
         run_store=run_store,
         receipt_store=receipt_store,
+        dispatcher=LocalDeterministicReplayDispatcher(()),
+        output_store=output_store,
         now=clock,
     )
     return runtime, run_store, receipt_store
@@ -319,6 +572,7 @@ def _running_state(
         replay_plan_id="plan-1",
         timeline_id="timeline-1",
         timeline_fingerprint_id="fp-1",
+        dispatcher_fingerprint=EMPTY_DISPATCHER_FINGERPRINT,
         created_at=_utc(6),
         updated_at=updated_at,
         started_at=_utc(6),
@@ -437,6 +691,7 @@ class TestCreateRunBinding:
         assert state.status is ReplayRunStatus.CREATED
         assert state.timeline_fingerprint_id == "fp-1"
         assert state.total_event_count == 3
+        assert state.dispatcher_fingerprint == EMPTY_DISPATCHER_FINGERPRINT
 
     def test_create_run_retry_returns_existing_without_calling_now(self) -> None:
         clock = _Clock()
@@ -452,6 +707,42 @@ class TestCreateRunBinding:
         runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
         with pytest.raises(ValueError, match="conflicting binding"):
             runtime.create_run("run-1", "manifest-other", "timeline-1", "fp-1")
+        assert clock.calls == 1
+
+    def test_create_run_retry_with_different_dispatcher_rejected(self) -> None:
+        clock = _Clock()
+        manifest_store = InMemoryReplayRunManifestStore()
+        timeline_store = InMemoryReplayTimelineStore()
+        fingerprint_store = InMemoryReplayArtifactFingerprintStore()
+        run_store = InMemoryReplayRunStateStore()
+        receipt_store = InMemoryReplayEventDispatchReceiptStore()
+        output_store = InMemoryReplayEventOutputRecordStore()
+        manifest_store.save(_manifest())
+        timeline_store.save(_timeline())
+        fingerprint_store.save(_fingerprint())
+        first = LocalDeterministicReplayRuntime(
+            manifest_store=manifest_store,
+            timeline_store=timeline_store,
+            fingerprint_store=fingerprint_store,
+            run_store=run_store,
+            receipt_store=receipt_store,
+            dispatcher=LocalDeterministicReplayDispatcher(()),
+            output_store=output_store,
+            now=clock,
+        )
+        first.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        second = LocalDeterministicReplayRuntime(
+            manifest_store=manifest_store,
+            timeline_store=timeline_store,
+            fingerprint_store=fingerprint_store,
+            run_store=run_store,
+            receipt_store=receipt_store,
+            dispatcher=LocalDeterministicReplayDispatcher((_AuditHandler("handler-a"),)),
+            output_store=output_store,
+            now=clock,
+        )
+        with pytest.raises(ValueError, match="conflicting binding"):
+            second.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
         assert clock.calls == 1
 
 
@@ -646,6 +937,287 @@ class TestRuntimeTransitions:
             dumped = model.model_dump()
             for name in forbidden:
                 assert name not in dumped
+
+
+class TestRuntimeDispatcherIntegration:
+    def test_empty_dispatcher_still_records_dispatcher_on_receipt(self) -> None:
+        runtime, _, receipt_store = _valid_runtime()
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        result = runtime.step_run("run-1")
+        receipt = result.processed_receipts[0]
+        assert receipt.dispatcher_fingerprint == EMPTY_DISPATCHER_FINGERPRINT
+        assert receipt.handler_ids == ()
+        assert receipt.output_record_ids == ()
+        assert receipt_store.list_for_run("run-1") == (receipt,)
+
+    def test_one_handler_outputs_are_journaled_and_linked_from_receipt(self) -> None:
+        handler = _AuditHandler("handler-a")
+        dispatcher = LocalDeterministicReplayDispatcher((handler,))
+        runtime, _, receipt_store, output_store = _runtime_with_dispatcher(dispatcher)
+        state = runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        result = runtime.step_run("run-1")
+        outputs = output_store.list_for_run("run-1")
+        receipt = result.processed_receipts[0]
+        assert state.dispatcher_fingerprint == dispatcher.dispatcher_fingerprint
+        assert handler.calls == [0]
+        assert len(outputs) == 1
+        assert receipt.handler_ids == ("handler-a",)
+        assert receipt.output_record_ids == (outputs[0].output_record_id,)
+        assert outputs[0].dispatch_receipt_id == receipt.receipt_id
+        assert runtime.outputs_for_run("run-1") == outputs
+        assert runtime.outputs_for_event("run-1", 0) == outputs
+        assert receipt_store.list_for_run("run-1") == (receipt,)
+
+    def test_multiple_handlers_and_outputs_are_deterministic(self) -> None:
+        handler_b = _AuditHandler("handler-b", outputs=('{"b":1}',))
+        handler_a = _AuditHandler("handler-a", outputs=('{"a":1}', '{"a":2}'))
+        dispatcher = LocalDeterministicReplayDispatcher((handler_b, handler_a))
+        runtime, _, _, output_store = _runtime_with_dispatcher(dispatcher)
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        result = runtime.step_run("run-1")
+        outputs = output_store.list_for_run("run-1")
+        assert [record.handler_id for record in outputs] == [
+            "handler-a",
+            "handler-a",
+            "handler-b",
+        ]
+        assert result.processed_receipts[0].output_record_ids == tuple(
+            record.output_record_id for record in outputs
+        )
+
+    def test_handler_failure_on_later_event_writes_nothing_for_step(self) -> None:
+        handler = _AuditHandler("handler-a", fail_on_order_index=1)
+        dispatcher = LocalDeterministicReplayDispatcher((handler,))
+        runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(
+            dispatcher
+        )
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        before = run_store.load("run-1")
+        with pytest.raises(RuntimeError, match="failed"):
+            runtime.step_run("run-1", max_events=2)
+        assert receipt_store.list_for_run("run-1") == ()
+        assert output_store.list_for_run("run-1") == ()
+        assert run_store.load("run-1") == before
+
+    def test_dispatcher_fingerprint_mismatch_rejected_before_writes(self) -> None:
+        mismatched_fingerprint = LocalDeterministicReplayDispatcher(
+            (_AuditHandler("handler-a"),)
+        ).dispatcher_fingerprint
+        state = _running_state().model_copy(
+            update={"dispatcher_fingerprint": mismatched_fingerprint}
+        )
+        runtime, run_store, receipt_store = _runtime_with_loaded_state(
+            state,
+            timeline=_timeline(),
+            clock=_SequenceClock((_utc(7),)),
+        )
+        with pytest.raises(ValueError, match="dispatcher fingerprint"):
+            runtime.step_run("run-1")
+        assert receipt_store.list_for_run("run-1") == ()
+        assert run_store.replaced is False
+
+    @pytest.mark.parametrize("operation", ["start", "step", "pause", "resume"])
+    def test_wrong_dispatcher_cannot_mutate_lifecycle(
+        self,
+        operation: str,
+    ) -> None:
+        run_store = InMemoryReplayRunStateStore()
+        receipt_store = InMemoryReplayEventDispatchReceiptStore()
+        output_store = InMemoryReplayEventOutputRecordStore()
+        creator = _shared_runtime(
+            LocalDeterministicReplayDispatcher(()),
+            run_store=run_store,
+            receipt_store=receipt_store,
+            output_store=output_store,
+            clock=_SequenceClock((_utc(6), _utc(6), _utc(6), _utc(6))),
+        )
+        creator.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        if operation in {"step", "pause", "resume"}:
+            creator.start_run("run-1")
+        if operation == "resume":
+            creator.pause_run("run-1")
+        before = run_store.load("run-1")
+
+        wrong_clock = _SequenceClock((_utc(7),))
+        wrong_runtime = _shared_runtime(
+            LocalDeterministicReplayDispatcher((_AuditHandler("handler-a"),)),
+            run_store=run_store,
+            receipt_store=receipt_store,
+            output_store=output_store,
+            clock=wrong_clock,
+        )
+        with pytest.raises(ValueError, match="dispatcher fingerprint"):
+            if operation == "start":
+                wrong_runtime.start_run("run-1")
+            elif operation == "step":
+                wrong_runtime.step_run("run-1")
+            elif operation == "pause":
+                wrong_runtime.pause_run("run-1")
+            else:
+                wrong_runtime.resume_run("run-1")
+        assert wrong_clock.calls == 0
+        assert run_store.load("run-1") == before
+        assert receipt_store.list_for_run("run-1") == ()
+        assert output_store.list_for_run("run-1") == ()
+
+    def test_corrupt_dispatcher_metadata_rejected_for_create_and_lifecycle(self) -> None:
+        corrupt = _CorruptMetadataDispatcher((_AuditHandler("handler-a"),))
+        runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(corrupt)
+        with pytest.raises(ValueError, match="dispatcher descriptors"):
+            runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        assert run_store.load("run-1") is None
+
+        valid_runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(
+            LocalDeterministicReplayDispatcher((_AuditHandler("handler-a"),))
+        )
+        valid_runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        corrupt_runtime = _shared_runtime(
+            corrupt,
+            run_store=run_store,
+            receipt_store=receipt_store,
+            output_store=output_store,
+            clock=_SequenceClock((_utc(7),)),
+        )
+        before = run_store.load("run-1")
+        with pytest.raises(ValueError, match="dispatcher descriptors"):
+            corrupt_runtime.start_run("run-1")
+        assert run_store.load("run-1") == before
+        assert receipt_store.list_for_run("run-1") == ()
+
+    def test_corrupt_dispatcher_metadata_rejected_for_idempotent_retry(self) -> None:
+        valid_runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(
+            LocalDeterministicReplayDispatcher((_AuditHandler("handler-a"),))
+        )
+        valid_runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        corrupt_runtime = _shared_runtime(
+            _CorruptMetadataDispatcher((_AuditHandler("handler-a"),)),
+            run_store=run_store,
+            receipt_store=receipt_store,
+            output_store=output_store,
+            clock=_SequenceClock((_utc(7),)),
+        )
+        with pytest.raises(ValueError, match="dispatcher descriptors"):
+            corrupt_runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+
+    def test_corrupt_dispatcher_selection_rejected_before_writes(self) -> None:
+        dispatcher = _CorruptSelectionDispatcher((_AuditHandler("handler-a"),))
+        runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(
+            dispatcher
+        )
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        before = run_store.load("run-1")
+        with pytest.raises(ValueError, match="selected dispatcher descriptors"):
+            runtime.step_run("run-1")
+        assert run_store.load("run-1") == before
+        assert receipt_store.list_for_run("run-1") == ()
+        assert output_store.list_for_run("run-1") == ()
+
+    def test_retry_after_state_cas_failure_is_idempotent(self) -> None:
+        handler = _AuditHandler("handler-a")
+        dispatcher = LocalDeterministicReplayDispatcher((handler,))
+        manifest_store = InMemoryReplayRunManifestStore()
+        timeline_store = InMemoryReplayTimelineStore()
+        fingerprint_store = InMemoryReplayArtifactFingerprintStore()
+        run_store = _FailNextReplaceRunStateStore()
+        receipt_store = InMemoryReplayEventDispatchReceiptStore()
+        output_store = InMemoryReplayEventOutputRecordStore()
+        manifest_store.save(_manifest())
+        timeline_store.save(_timeline())
+        fingerprint_store.save(_fingerprint())
+        runtime = LocalDeterministicReplayRuntime(
+            manifest_store=manifest_store,
+            timeline_store=timeline_store,
+            fingerprint_store=fingerprint_store,
+            run_store=run_store,
+            receipt_store=receipt_store,
+            dispatcher=dispatcher,
+            output_store=output_store,
+            now=_SequenceClock((_utc(6), _utc(6), _utc(6), _utc(6))),
+        )
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+
+        run_store.fail_next_replace = True
+        with pytest.raises(ValueError, match="simulated state CAS failure"):
+            runtime.step_run("run-1")
+        assert len(receipt_store.list_for_run("run-1")) == 1
+        assert len(output_store.list_for_run("run-1")) == 1
+        assert run_store.load("run-1").next_event_index == 0  # type: ignore[union-attr]
+
+        result = runtime.step_run("run-1")
+        assert result.next_event_index == 1
+        assert len(receipt_store.list_for_run("run-1")) == 1
+        assert len(output_store.list_for_run("run-1")) == 1
+
+    def test_changed_output_retry_conflicts_before_new_output_write(self) -> None:
+        handler = _AuditHandler("handler-a", outputs=('{"audit":"first"}',))
+        dispatcher = LocalDeterministicReplayDispatcher((handler,))
+        manifest_store = InMemoryReplayRunManifestStore()
+        timeline_store = InMemoryReplayTimelineStore()
+        fingerprint_store = InMemoryReplayArtifactFingerprintStore()
+        run_store = _FailNextReplaceRunStateStore()
+        receipt_store = InMemoryReplayEventDispatchReceiptStore()
+        output_store = InMemoryReplayEventOutputRecordStore()
+        manifest_store.save(_manifest())
+        timeline_store.save(_timeline())
+        fingerprint_store.save(_fingerprint())
+        runtime = LocalDeterministicReplayRuntime(
+            manifest_store=manifest_store,
+            timeline_store=timeline_store,
+            fingerprint_store=fingerprint_store,
+            run_store=run_store,
+            receipt_store=receipt_store,
+            dispatcher=dispatcher,
+            output_store=output_store,
+            now=_SequenceClock((_utc(6), _utc(6), _utc(6), _utc(6))),
+        )
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        run_store.fail_next_replace = True
+        with pytest.raises(ValueError, match="simulated state CAS failure"):
+            runtime.step_run("run-1")
+
+        handler.outputs = ('{"audit":"changed"}',)
+        before_outputs = output_store.list_for_run("run-1")
+        with pytest.raises(ValueError, match="receipt_id conflict"):
+            runtime.step_run("run-1")
+        assert output_store.list_for_run("run-1") == before_outputs
+
+    @pytest.mark.parametrize(
+        ("mode", "message"),
+        [
+            ("wrong_output_receipt", "dispatch_receipt_id"),
+            ("handler_ids", "handler_id"),
+            ("omitted_handler", "handler_ids"),
+            ("unknown_handler", "handler_ids"),
+            ("unsupported_included", "handler_ids"),
+            ("wrong_order", "handler_ids"),
+            ("wrong_version", "handler_version"),
+            ("output_ids", "output_record_id"),
+            ("binding", "run_id"),
+        ],
+    )
+    def test_faulty_dispatch_bundle_rejected_before_writes(
+        self,
+        mode: str,
+        message: str,
+    ) -> None:
+        runtime, run_store, receipt_store, output_store = _runtime_with_dispatcher(
+            _FaultyDispatcher(mode)
+        )
+        runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-1")
+        runtime.start_run("run-1")
+        before = run_store.load("run-1")
+        with pytest.raises(ValueError, match=message):
+            runtime.step_run("run-1")
+        assert output_store.list_for_run("run-1") == ()
+        assert receipt_store.list_for_run("run-1") == ()
+        assert run_store.load("run-1") == before
 
 
 def test_cas_stale_revision_rejected() -> None:

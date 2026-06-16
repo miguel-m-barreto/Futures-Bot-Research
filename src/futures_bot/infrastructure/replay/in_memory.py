@@ -10,6 +10,7 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
     ReplayEventDispatchReceipt,
+    ReplayEventOutputRecord,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayReadinessReport,
@@ -700,3 +701,85 @@ class InMemoryReplayEventDispatchReceiptStore:
                 key=lambda r: (r.run_id, r.event_order_index, r.receipt_id),
             )
         )
+
+
+class InMemoryReplayEventOutputRecordStore:
+    """Append-only in-memory replay event output record store.
+
+    No DB. No filesystem. No Kafka.
+    """
+
+    def __init__(self) -> None:
+        self._records: dict[str, ReplayEventOutputRecord] = {}
+
+    def save(self, record: ReplayEventOutputRecord) -> None:
+        """Save an output record, allowing exact duplicate saves only."""
+        revalidated = ReplayEventOutputRecord.model_validate(record.model_dump())
+        existing = self._records.get(revalidated.output_record_id)
+        if existing is not None:
+            if existing != revalidated:
+                raise ValueError(
+                    f"output_record_id conflict for {revalidated.output_record_id!r}"
+                )
+            return
+        self._records[revalidated.output_record_id] = revalidated
+
+    def load(self, output_record_id: str) -> ReplayEventOutputRecord | None:
+        """Return output record by output_record_id, or None."""
+        return self._records.get(output_record_id)
+
+    def list_for_run(self, run_id: str) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return records for run_id in deterministic dispatch order."""
+        return tuple(
+            sorted(
+                (record for record in self._records.values() if record.run_id == run_id),
+                key=_output_record_run_order_key,
+            )
+        )
+
+    def list_for_event(
+        self,
+        run_id: str,
+        event_order_index: int,
+    ) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return records for one run event in deterministic handler order."""
+        return tuple(
+            sorted(
+                (
+                    record
+                    for record in self._records.values()
+                    if record.run_id == run_id
+                    and record.event_order_index == event_order_index
+                ),
+                key=_output_record_run_order_key,
+            )
+        )
+
+    def list_all(self) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return all records in deterministic run/event/handler order."""
+        return tuple(sorted(self._records.values(), key=_output_record_all_order_key))
+
+
+def _output_record_run_order_key(
+    record: ReplayEventOutputRecord,
+) -> tuple[int, str, str, int, str]:
+    return (
+        record.event_order_index,
+        record.handler_id,
+        record.handler_version,
+        record.handler_output_index,
+        record.output_record_id,
+    )
+
+
+def _output_record_all_order_key(
+    record: ReplayEventOutputRecord,
+) -> tuple[str, int, str, str, int, str]:
+    return (
+        record.run_id,
+        record.event_order_index,
+        record.handler_id,
+        record.handler_version,
+        record.handler_output_index,
+        record.output_record_id,
+    )

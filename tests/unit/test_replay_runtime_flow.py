@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from futures_bot.domain.replay import (
+    ReplayDispatchContext,
+    ReplayHandlerOutputProposal,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayInputKind,
@@ -14,6 +16,7 @@ from futures_bot.domain.replay import (
     ReplayInstrumentRef,
     ReplayOrderingPolicy,
     ReplayRunStatus,
+    ReplayTimelineEvent,
 )
 from futures_bot.domain.research import TemporalWindow, TemporalWindowKind
 from futures_bot.infrastructure.replay.in_memory import (
@@ -21,6 +24,7 @@ from futures_bot.infrastructure.replay.in_memory import (
     InMemoryReplayArtifactFingerprintVerificationBatchReportStore,
     InMemoryReplayArtifactFingerprintVerificationStore,
     InMemoryReplayEventDispatchReceiptStore,
+    InMemoryReplayEventOutputRecordStore,
     InMemoryReplayInputBatchStore,
     InMemoryReplayInputDatasetStore,
     InMemoryReplayReadinessReportStore,
@@ -31,6 +35,7 @@ from futures_bot.infrastructure.replay.in_memory import (
     InMemoryReplayTimelineCursorStore,
     InMemoryReplayTimelineStore,
 )
+from futures_bot.replay.dispatch import LocalDeterministicReplayDispatcher
 from futures_bot.replay.integrity import (
     LocalReplayArtifactFingerprintBatchVerifier,
     LocalReplayArtifactFingerprinter,
@@ -77,6 +82,31 @@ def _record(record_id: str, index: int) -> ReplayInputRecord:
     )
 
 
+class _FlowAuditHandler:
+    handler_id = "flow-audit"
+    handler_version = "1"
+    supported_event_kinds = (ReplayInputKind.MARK_PRICE,)
+
+    def handle(
+        self,
+        context: ReplayDispatchContext,
+        event: ReplayTimelineEvent,
+    ) -> tuple[ReplayHandlerOutputProposal, ...]:
+        assert event.event_id == context.event_id
+        return (
+            ReplayHandlerOutputProposal(
+                output_kind="audit",
+                canonical_payload=(
+                    '{"event_id":"'
+                    + context.event_id
+                    + '","order_index":'
+                    + str(context.event_order_index)
+                    + "}"
+                ),
+            ),
+        )
+
+
 def test_full_replay_runtime_flow_is_metadata_only_and_deterministic() -> None:  # noqa: PLR0915
     input_dataset_store = InMemoryReplayInputDatasetStore()
     input_batch_store = InMemoryReplayInputBatchStore()
@@ -91,6 +121,7 @@ def test_full_replay_runtime_flow_is_metadata_only_and_deterministic() -> None: 
     manifest_store = InMemoryReplayRunManifestStore()
     run_store = InMemoryReplayRunStateStore()
     receipt_store = InMemoryReplayEventDispatchReceiptStore()
+    output_store = InMemoryReplayEventOutputRecordStore()
 
     dataset = ReplayInputDataset(
         input_dataset_id="input-ds-1",
@@ -181,6 +212,8 @@ def test_full_replay_runtime_flow_is_metadata_only_and_deterministic() -> None: 
         fingerprint_store=fingerprint_store,
         run_store=run_store,
         receipt_store=receipt_store,
+        dispatcher=LocalDeterministicReplayDispatcher((_FlowAuditHandler(),)),
+        output_store=output_store,
         now=lambda: _utc(6),
     )
     run = runtime.create_run("run-1", "manifest-1", "timeline-1", "fp-timeline-1")
@@ -193,12 +226,25 @@ def test_full_replay_runtime_flow_is_metadata_only_and_deterministic() -> None: 
 
     completed = runtime.load_run("run-1")
     receipts = runtime.receipts_for_run("run-1")
+    outputs = runtime.outputs_for_run("run-1")
     assert completed is not None
     assert completed.status is ReplayRunStatus.COMPLETED
     assert completed.processed_event_count == completed.total_event_count == len(timeline.events)
     assert [r.event_order_index for r in receipts] == [e.order_index for e in timeline.events]
     assert [r.event_id for r in receipts] == [e.event_id for e in timeline.events]
     assert len(receipts) == len(timeline.events)
+    assert len(outputs) == len(timeline.events)
+    assert [o.event_order_index for o in outputs] == [
+        e.order_index for e in timeline.events
+    ]
+    assert [o.event_id for o in outputs] == [e.event_id for e in timeline.events]
+    assert [o.handler_id for o in outputs] == ["flow-audit"] * len(timeline.events)
+    assert [r.output_record_ids for r in receipts] == [
+        (output.output_record_id,) for output in outputs
+    ]
+    assert {r.dispatcher_fingerprint for r in receipts} == {
+        completed.dispatcher_fingerprint
+    }
 
     assert timeline_before == timeline
     assert fingerprint_before == fingerprint

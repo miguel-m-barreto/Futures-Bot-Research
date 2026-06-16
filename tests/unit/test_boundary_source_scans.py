@@ -199,7 +199,9 @@ def test_replay_domain_ports_and_local_modules_do_not_import_forbidden_dependenc
         ROOT / "src/futures_bot/domain/replay.py",
         ROOT / "src/futures_bot/ports/replay.py",
         ROOT / "src/futures_bot/infrastructure/replay/in_memory.py",
+        ROOT / "src/futures_bot/replay/dispatch.py",
         ROOT / "src/futures_bot/replay/local.py",
+        ROOT / "src/futures_bot/replay/runtime.py",
     )
     forbidden = (
         "sqlalchemy",
@@ -223,8 +225,15 @@ def test_replay_domain_ports_and_local_modules_do_not_import_forbidden_dependenc
         "asyncio",
         "subprocess",
         "sleep",
+        "random",
+        "uuid",
         "open(",
         "write_text",
+        "DecisionStack",
+        "RiskGate",
+        "Ledger",
+        "EvaluationResultSet",
+        "MetricObservation",
     )
     for path in source_paths:
         source = path.read_text(encoding="utf-8")

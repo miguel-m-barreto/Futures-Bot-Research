@@ -7,9 +7,13 @@ from futures_bot.domain.replay import (
     ReplayArtifactFingerprintVerification,
     ReplayArtifactFingerprintVerificationBatchReport,
     ReplayArtifactKind,
+    ReplayDispatchContext,
     ReplayEventDispatchReceipt,
+    ReplayEventOutputRecord,
+    ReplayHandlerOutputProposal,
     ReplayInputBatch,
     ReplayInputDataset,
+    ReplayInputKind,
     ReplayReadinessReport,
     ReplayRunManifest,
     ReplayRunState,
@@ -17,6 +21,7 @@ from futures_bot.domain.replay import (
     ReplayTimelineCoverageDiff,
     ReplayTimelineCoverageReport,
     ReplayTimelineCursor,
+    ReplayTimelineEvent,
 )
 
 
@@ -332,4 +337,59 @@ class ReplayEventDispatchReceiptStorePort(Protocol):
 
     def list_all(self) -> tuple[ReplayEventDispatchReceipt, ...]:
         """Return all receipts ordered by run_id, event_order_index, receipt_id."""
+        ...
+
+
+class ReplayEventHandlerPort(Protocol):
+    """Synchronous deterministic replay event handler boundary."""
+
+    @property
+    def handler_id(self) -> str:
+        """Stable handler identity."""
+        ...
+
+    @property
+    def handler_version(self) -> str:
+        """Stable handler implementation/configuration version."""
+        ...
+
+    @property
+    def supported_event_kinds(self) -> tuple[ReplayInputKind, ...]:
+        """Replay input kinds supported by this handler."""
+        ...
+
+    def handle(
+        self,
+        context: ReplayDispatchContext,
+        event: ReplayTimelineEvent,
+    ) -> tuple[ReplayHandlerOutputProposal, ...]:
+        """Return deterministic audit output proposals for one event."""
+        ...
+
+
+class ReplayEventOutputRecordStorePort(Protocol):
+    """Append-only store for deterministic replay handler output records."""
+
+    def save(self, record: ReplayEventOutputRecord) -> None:
+        """Persist an output record."""
+        ...
+
+    def load(self, output_record_id: str) -> ReplayEventOutputRecord | None:
+        """Return output record by ID, or None."""
+        ...
+
+    def list_for_run(self, run_id: str) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return output records for run_id in deterministic order."""
+        ...
+
+    def list_for_event(
+        self,
+        run_id: str,
+        event_order_index: int,
+    ) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return output records for a run event in deterministic order."""
+        ...
+
+    def list_all(self) -> tuple[ReplayEventOutputRecord, ...]:
+        """Return all output records in deterministic order."""
         ...

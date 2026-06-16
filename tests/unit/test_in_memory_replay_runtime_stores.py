@@ -10,6 +10,7 @@ from futures_bot.domain.replay import (
     ReplayInputKind,
     ReplayRunState,
     ReplayRunStatus,
+    build_replay_dispatcher_fingerprint,
     build_replay_event_dispatch_receipt_id,
 )
 from futures_bot.infrastructure.replay.in_memory import (
@@ -24,6 +25,9 @@ from futures_bot.ports.replay import (
 
 def _utc(hour: int = 0) -> datetime:
     return datetime(2026, 1, 1, hour, tzinfo=UTC)
+
+
+EMPTY_DISPATCHER_FINGERPRINT = build_replay_dispatcher_fingerprint(())
 
 
 def _state(  # noqa: PLR0913 - compact test fixture builder
@@ -62,6 +66,7 @@ def _state(  # noqa: PLR0913 - compact test fixture builder
         replay_plan_id=replay_plan_id,
         timeline_id=timeline_id,
         timeline_fingerprint_id=timeline_fingerprint_id,
+        dispatcher_fingerprint=EMPTY_DISPATCHER_FINGERPRINT,
         created_at=created_at or _utc(1),
         updated_at=updated_at,
         started_at=started_at,
@@ -126,6 +131,7 @@ def _receipt(
         replay_plan_id="plan-1",
         timeline_id="timeline-1",
         timeline_fingerprint_id="fp-1",
+        dispatcher_fingerprint=EMPTY_DISPATCHER_FINGERPRINT,
         event_id=event_id,
         event_order_index=order_index,
         event_time=_utc(order_index + 1),

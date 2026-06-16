@@ -2123,6 +2123,430 @@ class ReplayRunStatus(StrEnum):
     INVALIDATED = "INVALIDATED"
 
 
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+_REPLAY_DISPATCHER_FINGERPRINT_RE = re.compile(r"replay-dispatcher:[0-9a-f]{64}")
+_REPLAY_OUTPUT_ID_RE = re.compile(r"replay-output:[0-9a-f]{64}")
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _validate_sha256_hex(value: str, field_name: str) -> str:
+    if not _SHA256_HEX_RE.fullmatch(value):
+        raise ValueError(f"{field_name} must be a 64-character lowercase hex string")
+    return value
+
+
+def _validate_replay_dispatcher_fingerprint(value: str) -> str:
+    value = _validate_required_text(value, "dispatcher_fingerprint")
+    if not _REPLAY_DISPATCHER_FINGERPRINT_RE.fullmatch(value):
+        raise ValueError(
+            "dispatcher_fingerprint must match replay-dispatcher:<64 lowercase hex>"
+        )
+    return value
+
+
+def _validate_replay_output_record_id_format(value: str) -> str:
+    value = _validate_required_text(value, "output_record_id")
+    if not _REPLAY_OUTPUT_ID_RE.fullmatch(value):
+        raise ValueError("output_record_id must match replay-output:<64 lowercase hex>")
+    return value
+
+
+def _validate_unique_sorted_text_tuple(
+    values: tuple[str, ...],
+    field_name: str,
+) -> tuple[str, ...]:
+    for value in values:
+        _validate_required_text(value, f"{field_name} element")
+    if len(values) != len(set(values)):
+        raise ValueError(f"duplicate {field_name} values are not allowed")
+    if values != tuple(sorted(values)):
+        raise ValueError(f"{field_name} must be sorted deterministically")
+    return values
+
+
+def _validate_canonical_output_payload(value: str) -> str:
+    value = _validate_required_text(value, "canonical_payload")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"canonical_payload is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("canonical_payload must be a top-level JSON object")
+    _validate_handler_output_json_value(parsed, "root")
+    if _canonical_json(parsed) != value:
+        raise ValueError("canonical_payload must be compact sorted canonical JSON")
+    return value
+
+
+def _validate_handler_output_json_value(value: object, path: str) -> None:
+    if isinstance(value, float):
+        raise ValueError(f"binary float at {path!r} is not allowed")
+    if value is None or isinstance(value, str | bool):
+        return
+    if isinstance(value, int):
+        if isinstance(value, bool):
+            raise ValueError(f"boolean at {path!r} must not be treated as an integer")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_handler_output_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or key != key.strip():
+                raise ValueError("canonical_payload object keys must be non-empty strings")
+            _validate_handler_output_json_value(item, f"{path}.{key}")
+        return
+    raise ValueError(f"unsupported canonical_payload value at {path!r}")
+
+
+class ReplayDispatchHandlerDescriptor(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    handler_id: str
+    handler_version: str
+    supported_event_kinds: tuple[ReplayInputKind, ...]
+
+    @field_validator("handler_id", "handler_version")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return _validate_required_text(value, "handler descriptor field")
+
+    @field_validator("supported_event_kinds")
+    @classmethod
+    def _validate_supported_event_kinds(
+        cls,
+        value: tuple[ReplayInputKind, ...],
+    ) -> tuple[ReplayInputKind, ...]:
+        if not value:
+            raise ValueError("supported_event_kinds must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("duplicate supported_event_kinds are not allowed")
+        if value != tuple(sorted(value, key=lambda kind: kind.value)):
+            raise ValueError("supported_event_kinds must be sorted by enum value")
+        return value
+
+
+def build_replay_dispatcher_fingerprint(
+    descriptors: tuple[ReplayDispatchHandlerDescriptor, ...],
+) -> str:
+    """Build a deterministic fingerprint for a replay dispatch registry."""
+    revalidated = tuple(
+        ReplayDispatchHandlerDescriptor.model_validate(d.model_dump())
+        for d in descriptors
+    )
+    handler_ids = [descriptor.handler_id for descriptor in revalidated]
+    if len(handler_ids) != len(set(handler_ids)):
+        raise ValueError("handler IDs must be unique")
+    material = [
+        {
+            "handler_id": descriptor.handler_id,
+            "handler_version": descriptor.handler_version,
+            "supported_event_kinds": [
+                kind.value for kind in descriptor.supported_event_kinds
+            ],
+        }
+        for descriptor in sorted(
+            revalidated,
+            key=lambda descriptor: (
+                descriptor.handler_id,
+                descriptor.handler_version,
+            ),
+        )
+    ]
+    return f"replay-dispatcher:{_sha256_text(_canonical_json(material))}"
+
+
+class ReplayDispatchContext(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    manifest_id: str
+    replay_plan_id: str
+    timeline_id: str
+    timeline_fingerprint_id: str
+    dispatcher_fingerprint: str
+    event_id: str
+    event_order_index: int
+    event_time: datetime
+    event_kind: ReplayInputKind
+
+    @field_validator(
+        "run_id",
+        "manifest_id",
+        "replay_plan_id",
+        "timeline_id",
+        "timeline_fingerprint_id",
+        "event_id",
+    )
+    @classmethod
+    def _validate_ids(cls, value: str) -> str:
+        return _validate_required_text(value, "dispatch context id")
+
+    @field_validator("dispatcher_fingerprint")
+    @classmethod
+    def _validate_dispatcher_fingerprint(cls, value: str) -> str:
+        return _validate_replay_dispatcher_fingerprint(value)
+
+    @field_validator("event_order_index", mode="before")
+    @classmethod
+    def _validate_event_order_index(cls, value: object) -> object:
+        return _validate_strict_int(value, "event_order_index")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> Self:
+        if self.event_order_index < 0:
+            raise ValueError("event_order_index must be >= 0")
+        return self
+
+
+class ReplayHandlerOutputProposal(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    output_kind: str
+    canonical_payload: str
+
+    @field_validator("output_kind")
+    @classmethod
+    def _validate_output_kind(cls, value: str) -> str:
+        return _validate_required_text(value, "output_kind")
+
+    @field_validator("canonical_payload")
+    @classmethod
+    def _validate_canonical_payload(cls, value: str) -> str:
+        return _validate_canonical_output_payload(value)
+
+
+def build_replay_event_output_record_id(  # noqa: PLR0913 - explicit ID material
+    *,
+    run_id: str,
+    event_order_index: int,
+    event_id: str,
+    handler_id: str,
+    handler_version: str,
+    handler_output_index: int,
+    output_kind: str,
+    payload_sha256: str,
+) -> str:
+    """Build a deterministic, delimiter-safe replay output journal record ID."""
+    material = {
+        "event_id": _validate_required_text(event_id, "event_id"),
+        "event_order_index": _validate_strict_int(
+            event_order_index,
+            "event_order_index",
+        ),
+        "handler_id": _validate_required_text(handler_id, "handler_id"),
+        "handler_output_index": _validate_strict_int(
+            handler_output_index,
+            "handler_output_index",
+        ),
+        "handler_version": _validate_required_text(handler_version, "handler_version"),
+        "output_kind": _validate_required_text(output_kind, "output_kind"),
+        "payload_sha256": _validate_sha256_hex(payload_sha256, "payload_sha256"),
+        "run_id": _validate_required_text(run_id, "run_id"),
+    }
+    if material["event_order_index"] < 0:
+        raise ValueError("event_order_index must be >= 0")
+    if material["handler_output_index"] < 0:
+        raise ValueError("handler_output_index must be >= 0")
+    return f"replay-output:{_sha256_text(_canonical_json(material))}"
+
+
+class ReplayEventOutputRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    output_record_id: str
+    dispatch_receipt_id: str
+    run_id: str
+    manifest_id: str
+    replay_plan_id: str
+    timeline_id: str
+    timeline_fingerprint_id: str
+    dispatcher_fingerprint: str
+    event_id: str
+    event_order_index: int
+    event_time: datetime
+    event_kind: ReplayInputKind
+    handler_id: str
+    handler_version: str
+    handler_output_index: int
+    output_kind: str
+    canonical_payload: str
+    payload_sha256: str
+
+    @field_validator(
+        "dispatch_receipt_id",
+        "run_id",
+        "manifest_id",
+        "replay_plan_id",
+        "timeline_id",
+        "timeline_fingerprint_id",
+        "event_id",
+        "handler_id",
+        "handler_version",
+        "output_kind",
+    )
+    @classmethod
+    def _validate_required_text_fields(cls, value: str) -> str:
+        return _validate_required_text(value, "output record field")
+
+    @field_validator("output_record_id")
+    @classmethod
+    def _validate_output_record_id(cls, value: str) -> str:
+        return _validate_replay_output_record_id_format(value)
+
+    @field_validator("dispatcher_fingerprint")
+    @classmethod
+    def _validate_dispatcher_fingerprint(cls, value: str) -> str:
+        return _validate_replay_dispatcher_fingerprint(value)
+
+    @field_validator("event_order_index", "handler_output_index", mode="before")
+    @classmethod
+    def _validate_integer_fields(cls, value: object) -> object:
+        return _validate_strict_int(value, "output record integer field")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("canonical_payload")
+    @classmethod
+    def _validate_canonical_payload(cls, value: str) -> str:
+        return _validate_canonical_output_payload(value)
+
+    @field_validator("payload_sha256")
+    @classmethod
+    def _validate_payload_sha256(cls, value: str) -> str:
+        return _validate_sha256_hex(value, "payload_sha256")
+
+    @model_validator(mode="after")
+    def _validate_output_record(self) -> Self:
+        if self.event_order_index < 0:
+            raise ValueError("event_order_index must be >= 0")
+        if self.handler_output_index < 0:
+            raise ValueError("handler_output_index must be >= 0")
+        expected_dispatch_receipt_id = build_replay_event_dispatch_receipt_id(
+            self.run_id,
+            self.event_order_index,
+            self.event_id,
+        )
+        if self.dispatch_receipt_id != expected_dispatch_receipt_id:
+            raise ValueError(
+                "dispatch_receipt_id must match deterministic replay dispatch ID"
+            )
+        if self.payload_sha256 != _sha256_text(self.canonical_payload):
+            raise ValueError("payload_sha256 must equal sha256(canonical_payload)")
+        expected = build_replay_event_output_record_id(
+            run_id=self.run_id,
+            event_order_index=self.event_order_index,
+            event_id=self.event_id,
+            handler_id=self.handler_id,
+            handler_version=self.handler_version,
+            handler_output_index=self.handler_output_index,
+            output_kind=self.output_kind,
+            payload_sha256=self.payload_sha256,
+        )
+        if self.output_record_id != expected:
+            raise ValueError("output_record_id must match deterministic replay output ID")
+        return self
+
+
+class ReplayEventDispatchPlan(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    context: ReplayDispatchContext
+    handler_ids: tuple[str, ...]
+    output_records: tuple[ReplayEventOutputRecord, ...]
+
+    @field_validator("context", mode="before")
+    @classmethod
+    def _fully_revalidate_context(cls, value: object) -> object:
+        if isinstance(value, ReplayDispatchContext):
+            return ReplayDispatchContext.model_validate(value.model_dump())
+        return ReplayDispatchContext.model_validate(value)
+
+    @field_validator("handler_ids")
+    @classmethod
+    def _validate_handler_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_unique_sorted_text_tuple(value, "handler_ids")
+
+    @field_validator("output_records", mode="before")
+    @classmethod
+    def _fully_revalidate_output_records(cls, value: object) -> object:
+        if not isinstance(value, tuple | list):
+            raise ValueError("output_records must be a tuple")
+        return tuple(
+            ReplayEventOutputRecord.model_validate(
+                item.model_dump() if isinstance(item, ReplayEventOutputRecord) else item
+            )
+            for item in value
+        )
+
+    @model_validator(mode="after")
+    def _validate_plan(self) -> Self:
+        record_ids = [record.output_record_id for record in self.output_records]
+        if len(record_ids) != len(set(record_ids)):
+            raise ValueError("duplicate output_record_id values are not allowed")
+        handler_positions = {handler_id: i for i, handler_id in enumerate(self.handler_ids)}
+        previous_key: tuple[int, int, str] | None = None
+        indexes_by_handler: dict[str, list[int]] = {}
+        for record in self.output_records:
+            _validate_output_record_matches_context(record, self.context)
+            if record.handler_id not in handler_positions:
+                raise ValueError("output record handler_id must be in handler_ids")
+            key = (
+                handler_positions[record.handler_id],
+                record.handler_output_index,
+                record.output_record_id,
+            )
+            if previous_key is not None and key <= previous_key:
+                raise ValueError("output records must be in deterministic handler order")
+            previous_key = key
+            indexes_by_handler.setdefault(record.handler_id, []).append(
+                record.handler_output_index
+            )
+        for handler_id, indexes in indexes_by_handler.items():
+            if indexes != list(range(len(indexes))):
+                raise ValueError(
+                    f"handler output indexes for {handler_id!r} must be contiguous"
+                )
+        return self
+
+
+def _validate_output_record_matches_context(
+    record: ReplayEventOutputRecord,
+    context: ReplayDispatchContext,
+) -> None:
+    comparisons = {
+        "run_id": context.run_id,
+        "manifest_id": context.manifest_id,
+        "replay_plan_id": context.replay_plan_id,
+        "timeline_id": context.timeline_id,
+        "timeline_fingerprint_id": context.timeline_fingerprint_id,
+        "dispatcher_fingerprint": context.dispatcher_fingerprint,
+        "event_id": context.event_id,
+        "event_order_index": context.event_order_index,
+        "event_time": context.event_time,
+        "event_kind": context.event_kind,
+    }
+    for field_name, expected in comparisons.items():
+        if getattr(record, field_name) != expected:
+            raise ValueError(f"output record {field_name} must match dispatch context")
+
+
 class ReplayRunState(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -2131,6 +2555,7 @@ class ReplayRunState(BaseModel):
     replay_plan_id: str
     timeline_id: str
     timeline_fingerprint_id: str
+    dispatcher_fingerprint: str
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None = None
@@ -2153,6 +2578,11 @@ class ReplayRunState(BaseModel):
     @classmethod
     def _validate_required_ids(cls, value: str) -> str:
         return _validate_required_text(value, "field")
+
+    @field_validator("dispatcher_fingerprint")
+    @classmethod
+    def _validate_dispatcher_fingerprint(cls, value: str) -> str:
+        return _validate_replay_dispatcher_fingerprint(value)
 
     @field_validator("created_at", "updated_at")
     @classmethod
@@ -2329,10 +2759,13 @@ class ReplayEventDispatchReceipt(BaseModel):
     replay_plan_id: str
     timeline_id: str
     timeline_fingerprint_id: str
+    dispatcher_fingerprint: str
     event_id: str
     event_order_index: int
     event_time: datetime
     event_kind: ReplayInputKind
+    handler_ids: tuple[str, ...] = ()
+    output_record_ids: tuple[str, ...] = ()
 
     @field_validator(
         "receipt_id",
@@ -2357,6 +2790,25 @@ class ReplayEventDispatchReceipt(BaseModel):
     def _validate_event_time(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
 
+    @field_validator("dispatcher_fingerprint")
+    @classmethod
+    def _validate_dispatcher_fingerprint(cls, value: str) -> str:
+        return _validate_replay_dispatcher_fingerprint(value)
+
+    @field_validator("handler_ids")
+    @classmethod
+    def _validate_handler_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return _validate_unique_sorted_text_tuple(value, "handler_ids")
+
+    @field_validator("output_record_ids")
+    @classmethod
+    def _validate_output_record_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for output_record_id in value:
+            _validate_replay_output_record_id_format(output_record_id)
+        if len(value) != len(set(value)):
+            raise ValueError("duplicate output_record_ids values are not allowed")
+        return value
+
     @model_validator(mode="after")
     def _validate_receipt(self) -> Self:
         if self.event_order_index < 0:
@@ -2368,6 +2820,8 @@ class ReplayEventDispatchReceipt(BaseModel):
         )
         if self.receipt_id != expected_receipt_id:
             raise ValueError("receipt_id must match deterministic replay dispatch ID")
+        if self.output_record_ids and not self.handler_ids:
+            raise ValueError("output_record_ids require at least one handler_id")
         return self
 
 
@@ -2405,6 +2859,18 @@ class ReplayRunStepResult(BaseModel):
     @classmethod
     def _validate_integer_fields(cls, value: object) -> object:
         return _validate_strict_int(value, "step result integer field")
+
+    @field_validator("processed_receipts", mode="before")
+    @classmethod
+    def _fully_revalidate_processed_receipts(cls, value: object) -> object:
+        if not isinstance(value, tuple | list):
+            raise ValueError("processed_receipts must be a tuple")
+        return tuple(
+            ReplayEventDispatchReceipt.model_validate(
+                item.model_dump() if isinstance(item, ReplayEventDispatchReceipt) else item
+            )
+            for item in value
+        )
 
     @model_validator(mode="after")
     def _validate_result(self) -> Self:  # noqa: PLR0912, PLR0915 - explicit transition matrix
@@ -2461,6 +2927,7 @@ class ReplayRunStepResult(BaseModel):
         for receipt in self.processed_receipts:
             if receipt.run_id != self.run_id:
                 raise ValueError("processed receipt run_id must match result run_id")
+        _validate_step_result_receipt_bindings(self.processed_receipts)
         _validate_replay_run_step_transition(self, progress_delta)
         if self.current_status is ReplayRunStatus.COMPLETED:
             if self.next_event_index != self.total_event_count:
@@ -2561,12 +3028,34 @@ def _validate_replay_run_step_transition(  # noqa: PLR0912 - explicit result mat
     )
 
 
+def _validate_step_result_receipt_bindings(
+    receipts: tuple[ReplayEventDispatchReceipt, ...],
+) -> None:
+    if not receipts:
+        return
+    first = receipts[0]
+    binding_fields = (
+        "manifest_id",
+        "replay_plan_id",
+        "timeline_id",
+        "timeline_fingerprint_id",
+        "dispatcher_fingerprint",
+    )
+    for receipt in receipts[1:]:
+        for field_name in binding_fields:
+            if getattr(receipt, field_name) != getattr(first, field_name):
+                raise ValueError(
+                    f"processed receipt {field_name} must match first receipt"
+                )
+
+
 _REPLAY_RUN_STATE_IDENTITY_FIELDS = (
     "run_id",
     "manifest_id",
     "replay_plan_id",
     "timeline_id",
     "timeline_fingerprint_id",
+    "dispatcher_fingerprint",
     "created_at",
     "total_event_count",
 )

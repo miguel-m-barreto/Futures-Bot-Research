@@ -12,6 +12,7 @@ from futures_bot.domain.replay import (
     ReplayRunState,
     ReplayRunStatus,
     ReplayRunStepResult,
+    build_replay_dispatcher_fingerprint,
     build_replay_event_dispatch_receipt_id,
     validate_replay_run_state_transition,
 )
@@ -21,6 +22,9 @@ def _utc(hour: int = 0) -> datetime:
     return datetime(2026, 1, 1, hour, tzinfo=UTC)
 
 
+EMPTY_DISPATCHER_FINGERPRINT = build_replay_dispatcher_fingerprint(())
+
+
 def _state(  # noqa: PLR0913 - compact test fixture builder
     *,
     run_id: str = "run-1",
@@ -28,6 +32,7 @@ def _state(  # noqa: PLR0913 - compact test fixture builder
     replay_plan_id: str = "plan-1",
     timeline_id: str = "timeline-1",
     timeline_fingerprint_id: str = "fp-1",
+    dispatcher_fingerprint: str = EMPTY_DISPATCHER_FINGERPRINT,
     created_at: datetime | None = None,
     status: ReplayRunStatus = ReplayRunStatus.CREATED,
     revision: int = 0,
@@ -46,6 +51,7 @@ def _state(  # noqa: PLR0913 - compact test fixture builder
         replay_plan_id=replay_plan_id,
         timeline_id=timeline_id,
         timeline_fingerprint_id=timeline_fingerprint_id,
+        dispatcher_fingerprint=dispatcher_fingerprint,
         created_at=created_at or _utc(1),
         updated_at=updated_at or created_at or _utc(1),
         started_at=started_at,
@@ -60,12 +66,19 @@ def _state(  # noqa: PLR0913 - compact test fixture builder
     )
 
 
-def _receipt(
+def _receipt(  # noqa: PLR0913 - compact receipt fixture builder
     *,
     run_id: str = "run-1",
+    manifest_id: str = "manifest-1",
+    replay_plan_id: str = "plan-1",
+    timeline_id: str = "timeline-1",
+    timeline_fingerprint_id: str = "fp-1",
+    dispatcher_fingerprint: str = EMPTY_DISPATCHER_FINGERPRINT,
     event_id: str = "event-0",
     order_index: int = 0,
     receipt_id: str | None = None,
+    handler_ids: tuple[str, ...] = (),
+    output_record_ids: tuple[str, ...] = (),
 ) -> ReplayEventDispatchReceipt:
     if receipt_id is None:
         receipt_id = build_replay_event_dispatch_receipt_id(
@@ -76,14 +89,17 @@ def _receipt(
     return ReplayEventDispatchReceipt(
         receipt_id=receipt_id,
         run_id=run_id,
-        manifest_id="manifest-1",
-        replay_plan_id="plan-1",
-        timeline_id="timeline-1",
-        timeline_fingerprint_id="fp-1",
+        manifest_id=manifest_id,
+        replay_plan_id=replay_plan_id,
+        timeline_id=timeline_id,
+        timeline_fingerprint_id=timeline_fingerprint_id,
+        dispatcher_fingerprint=dispatcher_fingerprint,
         event_id=event_id,
         event_order_index=order_index,
         event_time=_utc(2),
         event_kind=ReplayInputKind.MARK_PRICE,
+        handler_ids=handler_ids,
+        output_record_ids=output_record_ids,
     )
 
 
@@ -428,6 +444,63 @@ class TestReplayRunStepResult:
     def test_receipt_from_another_run_rejected(self) -> None:
         with pytest.raises(ValidationError, match="run_id"):
             _result(receipts=(_receipt(run_id="run-other"),))
+
+    @pytest.mark.parametrize(
+        "tamper",
+        [
+            {"dispatcher_fingerprint": "bad"},
+            {"handler_ids": ("handler-a", "handler-a")},
+            {"handler_ids": (), "output_record_ids": ("replay-output:" + "0" * 64,)},
+            {
+                "handler_ids": ("handler-a",),
+                "output_record_ids": ("bad-output-id",),
+            },
+            {
+                "handler_ids": ("handler-a",),
+                "output_record_ids": (
+                    "replay-output:" + "0" * 64,
+                    "replay-output:" + "0" * 64,
+                ),
+            },
+            {"receipt_id": "replay-dispatch:" + "0" * 64},
+        ],
+    )
+    def test_processed_receipts_are_fully_revalidated(
+        self,
+        tamper: dict[str, object],
+    ) -> None:
+        receipt = _receipt().model_copy(update=tamper)
+        with pytest.raises(ValidationError):
+            _result(receipts=(receipt,))
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("manifest_id", "manifest-2"),
+            ("replay_plan_id", "plan-2"),
+            ("timeline_id", "timeline-2"),
+            ("timeline_fingerprint_id", "fp-2"),
+            ("dispatcher_fingerprint", "replay-dispatcher:" + "0" * 64),
+        ],
+    )
+    def test_processed_receipts_must_share_immutable_binding(
+        self,
+        field: str,
+        value: str,
+    ) -> None:
+        receipts = (
+            _receipt(order_index=0, event_id="event-0"),
+            _receipt(order_index=1, event_id="event-1").model_copy(update={field: value}),
+        )
+        with pytest.raises(ValidationError, match=field):
+            _result(previous_index=0, current_index=2, receipts=receipts)
+
+    def test_receipt_output_ids_require_handler_ids(self) -> None:
+        with pytest.raises(ValidationError, match="output_record_ids require"):
+            _receipt(output_record_ids=("replay-output:" + "0" * 64,))
+        assert _receipt(handler_ids=("handler-a",), output_record_ids=()).handler_ids == (
+            "handler-a",
+        )
 
     def test_receipt_count_must_match_progress_delta(self) -> None:
         with pytest.raises(ValidationError, match="receipt count"):
