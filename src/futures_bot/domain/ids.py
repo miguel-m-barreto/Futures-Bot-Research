@@ -155,3 +155,27 @@ class BrokerMessageId(DomainId):
 
 class BatchId(DomainId):
     pass
+
+
+class MarketDataSourceId(DomainId):
+    pass
+
+
+class VenueInstrumentId(DomainId):
+    pass
+
+
+class MarketObservationId(DomainId):
+    pass
+
+
+class MarketConnectionId(DomainId):
+    pass
+
+
+class MarketHealthSnapshotId(DomainId):
+    pass
+
+
+class MarketFrameId(DomainId):
+    pass

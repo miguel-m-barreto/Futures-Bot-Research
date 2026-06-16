@@ -925,3 +925,40 @@ def test_replay_run_manifest_tests_do_not_read_docs() -> None:
             continue
         source = path.read_text(encoding="utf-8")
         assert forbidden_dir not in source, f"found docs reference in {path.name}"
+
+
+def test_market_data_sprint_sources_do_not_use_forbidden_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/market_data.py",
+        ROOT / "src/futures_bot/market_data/frame_builder.py",
+        ROOT / "src/futures_bot/ports/market_data.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "asyncio",
+        "threading",
+        "subprocess",
+        "Kafka",
+        "Postgres",
+        "SQLAlchemy",
+        "DecisionStack",
+        "RiskBehaviorModel",
+        "HardRiskGate",
+        "Execution",
+        "OrderIntent",
+        "Ledger",
+        "PnL",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
