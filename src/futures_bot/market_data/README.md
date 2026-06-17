@@ -37,3 +37,25 @@ missing; they are not silently replaced by another source.
 The frame builder does not generate alpha, consensus prices, preferred venues,
 leader venues, lagger venues, fallback prices, or merged books. Lead-lag remains
 a future measured hypothesis, and no venue is assumed to lead permanently.
+
+## Replay Projection
+
+Replay market projection keeps `ReplayInputRecord.payload` in the validated
+`ReplayInputBatch`. `ReplayTimelineEvent` remains a metadata reference to the
+batch, dataset, record, event kind, instrument, event time, sequence, order
+index, and content hash.
+
+`ReplayMarketDataBinding` explicitly maps the legacy replay instrument identity
+to the market-data source and venue-instrument authority. The projection does not
+infer market kind, settlement, collateral, or venue aliases from raw symbols.
+
+`EVENT_TIME_AS_SOURCE_AND_RECEIVED` is deterministic legacy replay behavior:
+source event time and received time both come from the replay record event time,
+engine time is absent, monotonic time is zero, and reconnect generation is zero.
+This does not claim real receive latency and is unsuitable for real latency or
+lead-lag measurement.
+
+Replay market frames are generated in replay timeline order. Same-timestamp
+later events do not enter earlier frames. The projection does not fabricate
+source-health state; replay source-health events and future decision context are
+separate future work.

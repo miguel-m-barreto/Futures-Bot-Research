@@ -179,3 +179,19 @@ class MarketHealthSnapshotId(DomainId):
 
 class MarketFrameId(DomainId):
     pass
+
+
+class ReplayMarketBindingId(DomainId):
+    pass
+
+
+class ReplayMarketObservationProjectionId(DomainId):
+    pass
+
+
+class ReplayMarketFrameProjectionId(DomainId):
+    pass
+
+
+class ReplayMarketFrameTimelineId(DomainId):
+    pass

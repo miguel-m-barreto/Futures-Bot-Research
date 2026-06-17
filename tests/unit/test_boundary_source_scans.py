@@ -962,3 +962,43 @@ def test_market_data_sprint_sources_do_not_use_forbidden_runtime_dependencies() 
         source = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_replay_market_data_sources_do_not_use_forbidden_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/replay_market_data.py",
+        ROOT / "src/futures_bot/market_data/replay_adapter.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "asyncio",
+        "threading",
+        "subprocess",
+        "Kafka",
+        "Postgres",
+        "SQLAlchemy",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "DecisionStack",
+        "RiskBehaviorModel",
+        "HardRiskGate",
+        "OrderIntent",
+        "Execution",
+        "Ledger",
+        "PnL",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
