@@ -8,7 +8,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.assets import AssetAmount, AssetSymbol
+from futures_bot.domain.assets import AssetAmount, AssetSymbol, StableCollateralAsset
 from futures_bot.domain.ids import BotId, CandidateId, DecisionIntentId
 from futures_bot.domain.instruments import InstrumentSymbol, normalize_instrument_symbol
 from futures_bot.domain.time import ensure_aware_utc
@@ -90,6 +90,17 @@ class DecisionIntent(BaseModel):
         raise ValueError(
             "proposed_margin must be an AssetAmount, serialized mapping, or None"
         )
+
+    @field_validator("proposed_margin")
+    @classmethod
+    def _validate_proposed_margin_asset(
+        cls,
+        value: AssetAmount | None,
+    ) -> AssetAmount | None:
+        if value is None:
+            return None
+        StableCollateralAsset(str(value.asset))
+        return value
 
     @field_validator("instrument", mode="before")
     @classmethod

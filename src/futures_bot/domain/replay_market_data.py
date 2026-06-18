@@ -13,8 +13,10 @@ from futures_bot.domain.ids import (
     DomainId,
     MarketConnectionId,
     MarketDataSourceId,
+    MarketFrameId,
     MarketObservationId,
     ReplayMarketBindingId,
+    ReplayMarketFrameLookupEntryId,
     ReplayMarketFrameProjectionId,
     ReplayMarketFrameTimelineId,
     ReplayMarketObservationProjectionId,
@@ -41,13 +43,18 @@ _ADAPTER_FINGERPRINT_RE = re.compile(r"^replay-market-adapter:[0-9a-f]{64}$")
 _BINDING_AUTHORITY_FINGERPRINT_RE = re.compile(
     r"^replay-market-binding-authority:[0-9a-f]{64}$"
 )
+_LOOKUP_AUTHORITY_FINGERPRINT_RE = re.compile(
+    r"^replay-market-frame-lookup-authority:[0-9a-f]{64}$"
+)
 _CONNECTION_ID_RE = re.compile(r"^replay-market-connection:[0-9a-f]{64}$")
 _MARKET_OBSERVATION_ID_RE = re.compile(r"^market-observation:[0-9a-f]{64}$")
+_MARKET_FRAME_ID_RE = re.compile(r"^market-frame:[0-9a-f]{64}$")
 _OBSERVATION_PROJECTION_ID_RE = re.compile(
     r"^replay-market-observation-projection:[0-9a-f]{64}$"
 )
 _FRAME_PROJECTION_ID_RE = re.compile(r"^replay-market-frame-projection:[0-9a-f]{64}$")
 _TIMELINE_ID_RE = re.compile(r"^replay-market-frame-timeline:[0-9a-f]{64}$")
+_LOOKUP_ENTRY_ID_RE = re.compile(r"^replay-market-frame-lookup-entry:[0-9a-f]{64}$")
 _SUPPORTED_INPUT_KINDS = frozenset(
     {
         ReplayInputKind.TRADE,
@@ -258,6 +265,256 @@ class ReplayMarketBindingAuthority(BaseModel):
         return self
 
 
+class ReplayMarketFrameLookupEntry(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    entry_id: ReplayMarketFrameLookupEntryId
+    market_timeline_id: ReplayMarketFrameTimelineId
+    replay_timeline_id: str
+    replay_plan_id: str
+    adapter_fingerprint: str
+    event_id: str
+    event_order_index: int
+    event_time: datetime
+    event_kind: ReplayInputKind
+    observation_projection_id: ReplayMarketObservationProjectionId
+    frame_projection_id: ReplayMarketFrameProjectionId
+    frame_id: MarketFrameId
+    triggering_observation_id: MarketObservationId
+    binding_authority_fingerprint: str
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: object) -> int:
+        return _strict_literal_one(value, "schema_version")
+
+    @field_validator("entry_id", mode="before")
+    @classmethod
+    def _revalidate_entry_id(cls, value: object) -> ReplayMarketFrameLookupEntryId:
+        entry_id = _revalidate_domain_id(ReplayMarketFrameLookupEntryId, value)
+        if not _LOOKUP_ENTRY_ID_RE.fullmatch(str(entry_id)):
+            raise ValueError("invalid replay market frame lookup entry ID")
+        return entry_id
+
+    @field_validator("market_timeline_id", mode="before")
+    @classmethod
+    def _revalidate_market_timeline_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketFrameTimelineId:
+        return _validate_market_timeline_id(value)
+
+    @field_validator("replay_timeline_id", "replay_plan_id", "event_id")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return _trimmed(value, "lookup entry text")
+
+    @field_validator("adapter_fingerprint")
+    @classmethod
+    def _validate_adapter_fingerprint(cls, value: str) -> str:
+        return _validate_adapter_fingerprint(value)
+
+    @field_validator("event_order_index", mode="before")
+    @classmethod
+    def _validate_event_order_index(cls, value: object) -> int:
+        return _strict_non_negative_int(value, "event_order_index")
+
+    @field_validator("event_time")
+    @classmethod
+    def _validate_event_time(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("observation_projection_id", mode="before")
+    @classmethod
+    def _revalidate_observation_projection_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketObservationProjectionId:
+        return _validate_observation_projection_id(value)
+
+    @field_validator("frame_projection_id", mode="before")
+    @classmethod
+    def _revalidate_frame_projection_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketFrameProjectionId:
+        return _validate_frame_projection_id(value)
+
+    @field_validator("frame_id", mode="before")
+    @classmethod
+    def _revalidate_frame_id(cls, value: object) -> MarketFrameId:
+        return _validate_market_frame_id(value)
+
+    @field_validator("triggering_observation_id", mode="before")
+    @classmethod
+    def _revalidate_triggering_observation_id(cls, value: object) -> MarketObservationId:
+        return _validate_market_observation_id(value)
+
+    @field_validator("binding_authority_fingerprint")
+    @classmethod
+    def _validate_binding_authority_fingerprint(cls, value: str) -> str:
+        return _validate_binding_authority_fingerprint(value)
+
+    @model_validator(mode="after")
+    def _validate_entry(self) -> Self:
+        expected = build_replay_market_frame_lookup_entry_id(
+            market_timeline_id=self.market_timeline_id,
+            replay_timeline_id=self.replay_timeline_id,
+            replay_plan_id=self.replay_plan_id,
+            adapter_fingerprint=self.adapter_fingerprint,
+            event_id=self.event_id,
+            event_order_index=self.event_order_index,
+            event_time=self.event_time,
+            event_kind=self.event_kind,
+            observation_projection_id=self.observation_projection_id,
+            frame_projection_id=self.frame_projection_id,
+            frame_id=self.frame_id,
+            triggering_observation_id=self.triggering_observation_id,
+            binding_authority_fingerprint=self.binding_authority_fingerprint,
+        )
+        if self.entry_id != expected:
+            raise ValueError("entry_id must match deterministic lookup entry ID")
+        return self
+
+
+class ReplayMarketFrameLookupAuthority(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    market_timeline_id: ReplayMarketFrameTimelineId
+    replay_timeline_id: str
+    replay_plan_id: str
+    adapter_fingerprint: str
+    supported_event_kinds: tuple[ReplayInputKind, ...]
+    entries: tuple[ReplayMarketFrameLookupEntry, ...]
+    lookup_authority_fingerprint: str
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: object) -> int:
+        return _strict_literal_one(value, "schema_version")
+
+    @field_validator("market_timeline_id", mode="before")
+    @classmethod
+    def _revalidate_market_timeline_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketFrameTimelineId:
+        return _validate_market_timeline_id(value)
+
+    @field_validator("replay_timeline_id", "replay_plan_id")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return _trimmed(value, "lookup authority text")
+
+    @field_validator("adapter_fingerprint")
+    @classmethod
+    def _validate_adapter_fingerprint(cls, value: str) -> str:
+        return _validate_adapter_fingerprint(value)
+
+    @field_validator("supported_event_kinds")
+    @classmethod
+    def _validate_supported_event_kinds(
+        cls,
+        value: tuple[ReplayInputKind, ...],
+    ) -> tuple[ReplayInputKind, ...]:
+        return _validate_market_projection_event_kinds(value)
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def _revalidate_entries(
+        cls,
+        value: object,
+    ) -> tuple[ReplayMarketFrameLookupEntry, ...]:
+        if not isinstance(value, tuple | list):
+            raise ValueError("lookup authority entries must be a tuple or list")
+        entries = tuple(
+            _revalidate_model(ReplayMarketFrameLookupEntry, item) for item in value
+        )
+        if not entries:
+            raise ValueError("lookup authority entries must be non-empty")
+        return entries
+
+    @field_validator("lookup_authority_fingerprint")
+    @classmethod
+    def _validate_lookup_authority_fingerprint(cls, value: str) -> str:
+        return _validate_lookup_authority_fingerprint(value)
+
+    @model_validator(mode="after")
+    def _validate_authority(self) -> Self:
+        _validate_lookup_authority_entries(
+            market_timeline_id=self.market_timeline_id,
+            replay_timeline_id=self.replay_timeline_id,
+            replay_plan_id=self.replay_plan_id,
+            adapter_fingerprint=self.adapter_fingerprint,
+            supported_event_kinds=self.supported_event_kinds,
+            entries=self.entries,
+        )
+        expected = build_replay_market_frame_lookup_authority_fingerprint(
+            market_timeline_id=self.market_timeline_id,
+            replay_timeline_id=self.replay_timeline_id,
+            replay_plan_id=self.replay_plan_id,
+            adapter_fingerprint=self.adapter_fingerprint,
+            supported_event_kinds=self.supported_event_kinds,
+            entries=self.entries,
+        )
+        if self.lookup_authority_fingerprint != expected:
+            raise ValueError("lookup_authority_fingerprint must match lookup authority")
+        return self
+
+
+class ReplayMarketFrameLookupDescriptor(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    market_timeline_id: ReplayMarketFrameTimelineId
+    replay_timeline_id: str
+    replay_plan_id: str
+    adapter_fingerprint: str
+    lookup_authority_fingerprint: str
+    supported_event_kinds: tuple[ReplayInputKind, ...]
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: object) -> int:
+        return _strict_literal_one(value, "schema_version")
+
+    @field_validator("market_timeline_id", mode="before")
+    @classmethod
+    def _revalidate_market_timeline_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketFrameTimelineId:
+        timeline_id = _revalidate_domain_id(ReplayMarketFrameTimelineId, value)
+        if not _TIMELINE_ID_RE.fullmatch(str(timeline_id)):
+            raise ValueError("invalid replay market frame timeline ID")
+        return timeline_id
+
+    @field_validator("replay_timeline_id", "replay_plan_id")
+    @classmethod
+    def _validate_text(cls, value: str) -> str:
+        return _trimmed(value, "market frame lookup descriptor text")
+
+    @field_validator("adapter_fingerprint")
+    @classmethod
+    def _validate_adapter_fingerprint(cls, value: str) -> str:
+        return _validate_adapter_fingerprint(value)
+
+    @field_validator("lookup_authority_fingerprint")
+    @classmethod
+    def _validate_lookup_authority_fingerprint(cls, value: str) -> str:
+        return _validate_lookup_authority_fingerprint(value)
+
+    @field_validator("supported_event_kinds")
+    @classmethod
+    def _validate_supported_event_kinds(
+        cls,
+        value: tuple[ReplayInputKind, ...],
+    ) -> tuple[ReplayInputKind, ...]:
+        return _validate_market_projection_event_kinds(value)
+
+
 class ReplayMarketObservationProjection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -440,6 +697,54 @@ class ReplayMarketFrameProjection(BaseModel):
         return self
 
 
+class ReplayMarketFrameLookupResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    descriptor: ReplayMarketFrameLookupDescriptor
+    entry: ReplayMarketFrameLookupEntry
+    observation_projection: ReplayMarketObservationProjection
+    frame_projection: ReplayMarketFrameProjection
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: object) -> int:
+        return _strict_literal_one(value, "schema_version")
+
+    @field_validator("descriptor", mode="before")
+    @classmethod
+    def _revalidate_descriptor(cls, value: object) -> ReplayMarketFrameLookupDescriptor:
+        return _revalidate_model(ReplayMarketFrameLookupDescriptor, value)
+
+    @field_validator("entry", mode="before")
+    @classmethod
+    def _revalidate_entry(cls, value: object) -> ReplayMarketFrameLookupEntry:
+        return _revalidate_model(ReplayMarketFrameLookupEntry, value)
+
+    @field_validator("observation_projection", mode="before")
+    @classmethod
+    def _revalidate_observation_projection(
+        cls,
+        value: object,
+    ) -> ReplayMarketObservationProjection:
+        return _revalidate_model(ReplayMarketObservationProjection, value)
+
+    @field_validator("frame_projection", mode="before")
+    @classmethod
+    def _revalidate_frame_projection(cls, value: object) -> ReplayMarketFrameProjection:
+        return _revalidate_model(ReplayMarketFrameProjection, value)
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> Self:
+        validate_replay_market_frame_lookup_result(
+            descriptor=self.descriptor,
+            entry=self.entry,
+            observation_projection=self.observation_projection,
+            frame_projection=self.frame_projection,
+        )
+        return self
+
+
 class ReplayMarketFrameTimeline(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -533,6 +838,21 @@ def validate_replay_market_observation_kind(
         raise ValueError("unsupported replay input kind for market observation")
     if observation.payload.kind is not expected:
         raise ValueError("replay event kind must match market observation payload kind")
+
+
+def _validate_market_projection_event_kinds(
+    value: tuple[ReplayInputKind, ...],
+) -> tuple[ReplayInputKind, ...]:
+    if not value:
+        raise ValueError("supported_event_kinds must be non-empty")
+    if len(value) != len(set(value)):
+        raise ValueError("supported_event_kinds must be unique")
+    if value != tuple(sorted(value, key=lambda kind: kind.value)):
+        raise ValueError("supported_event_kinds must be sorted by enum value")
+    unsupported = tuple(kind for kind in value if kind not in _SUPPORTED_INPUT_KINDS)
+    if unsupported:
+        raise ValueError("supported_event_kinds must be market projection kinds")
+    return value
 
 
 def validate_replay_market_projection_descriptor(
@@ -706,6 +1026,280 @@ def build_replay_market_binding_authority(
             descriptor=revalidated_descriptor,
             binding=revalidated_binding,
         ),
+    )
+
+
+def build_replay_market_frame_lookup_entry_id(  # noqa: PLR0913
+    *,
+    market_timeline_id: ReplayMarketFrameTimelineId,
+    replay_timeline_id: str,
+    replay_plan_id: str,
+    adapter_fingerprint: str,
+    event_id: str,
+    event_order_index: int,
+    event_time: datetime,
+    event_kind: ReplayInputKind,
+    observation_projection_id: ReplayMarketObservationProjectionId,
+    frame_projection_id: ReplayMarketFrameProjectionId,
+    frame_id: MarketFrameId,
+    triggering_observation_id: MarketObservationId,
+    binding_authority_fingerprint: str,
+) -> ReplayMarketFrameLookupEntryId:
+    material = {
+        "schema_version": 1,
+        "adapter_fingerprint": _validate_adapter_fingerprint(adapter_fingerprint),
+        "binding_authority_fingerprint": _validate_binding_authority_fingerprint(
+            binding_authority_fingerprint
+        ),
+        "event_id": _trimmed(event_id, "event_id"),
+        "event_kind": ReplayInputKind(event_kind).value,
+        "event_order_index": _strict_non_negative_int(
+            event_order_index,
+            "event_order_index",
+        ),
+        "event_time": _json_datetime(event_time),
+        "frame_id": _validate_market_frame_id(frame_id).model_dump(mode="json"),
+        "frame_projection_id": _validate_frame_projection_id(
+            frame_projection_id
+        ).model_dump(mode="json"),
+        "market_timeline_id": _validate_market_timeline_id(
+            market_timeline_id
+        ).model_dump(mode="json"),
+        "observation_projection_id": _validate_observation_projection_id(
+            observation_projection_id
+        ).model_dump(mode="json"),
+        "replay_plan_id": _trimmed(replay_plan_id, "replay_plan_id"),
+        "replay_timeline_id": _trimmed(replay_timeline_id, "replay_timeline_id"),
+        "triggering_observation_id": _validate_market_observation_id(
+            triggering_observation_id
+        ).model_dump(mode="json"),
+    }
+    return ReplayMarketFrameLookupEntryId.from_str(
+        f"replay-market-frame-lookup-entry:{_sha256_text(_canonical_json(material))}"
+    )
+
+
+def build_replay_market_frame_lookup_entry(  # noqa: PLR0913
+    *,
+    market_timeline_id: ReplayMarketFrameTimelineId,
+    replay_timeline_id: str,
+    replay_plan_id: str,
+    adapter_fingerprint: str,
+    observation_projection: ReplayMarketObservationProjection,
+    frame_projection: ReplayMarketFrameProjection,
+) -> ReplayMarketFrameLookupEntry:
+    observation_projection = _revalidate_model(
+        ReplayMarketObservationProjection,
+        observation_projection,
+    )
+    frame_projection = _revalidate_model(ReplayMarketFrameProjection, frame_projection)
+    _validate_projection_pair(
+        descriptor_replay_timeline_id=_trimmed(replay_timeline_id, "replay_timeline_id"),
+        supported_event_kinds=(observation_projection.event_kind,),
+        observation_projection=observation_projection,
+        frame_projection=frame_projection,
+    )
+    entry_id = build_replay_market_frame_lookup_entry_id(
+        market_timeline_id=market_timeline_id,
+        replay_timeline_id=replay_timeline_id,
+        replay_plan_id=replay_plan_id,
+        adapter_fingerprint=adapter_fingerprint,
+        event_id=observation_projection.event_id,
+        event_order_index=observation_projection.event_order_index,
+        event_time=observation_projection.event_time,
+        event_kind=observation_projection.event_kind,
+        observation_projection_id=observation_projection.projection_id,
+        frame_projection_id=frame_projection.projection_id,
+        frame_id=frame_projection.frame.frame_id,
+        triggering_observation_id=frame_projection.triggering_observation_id,
+        binding_authority_fingerprint=(
+            observation_projection.binding_authority.binding_authority_fingerprint
+        ),
+    )
+    return ReplayMarketFrameLookupEntry(
+        entry_id=entry_id,
+        market_timeline_id=market_timeline_id,
+        replay_timeline_id=replay_timeline_id,
+        replay_plan_id=replay_plan_id,
+        adapter_fingerprint=adapter_fingerprint,
+        event_id=observation_projection.event_id,
+        event_order_index=observation_projection.event_order_index,
+        event_time=observation_projection.event_time,
+        event_kind=observation_projection.event_kind,
+        observation_projection_id=observation_projection.projection_id,
+        frame_projection_id=frame_projection.projection_id,
+        frame_id=frame_projection.frame.frame_id,
+        triggering_observation_id=frame_projection.triggering_observation_id,
+        binding_authority_fingerprint=(
+            observation_projection.binding_authority.binding_authority_fingerprint
+        ),
+    )
+
+
+def build_replay_market_frame_lookup_authority_fingerprint(  # noqa: PLR0913
+    *,
+    market_timeline_id: ReplayMarketFrameTimelineId,
+    replay_timeline_id: str,
+    replay_plan_id: str,
+    adapter_fingerprint: str,
+    supported_event_kinds: tuple[ReplayInputKind, ...],
+    entries: tuple[ReplayMarketFrameLookupEntry, ...],
+) -> str:
+    revalidated_entries = tuple(
+        _revalidate_model(ReplayMarketFrameLookupEntry, entry) for entry in entries
+    )
+    revalidated_kinds = _validate_market_projection_event_kinds(supported_event_kinds)
+    _validate_lookup_authority_entries(
+        market_timeline_id=_validate_market_timeline_id(market_timeline_id),
+        replay_timeline_id=_trimmed(replay_timeline_id, "replay_timeline_id"),
+        replay_plan_id=_trimmed(replay_plan_id, "replay_plan_id"),
+        adapter_fingerprint=_validate_adapter_fingerprint(adapter_fingerprint),
+        supported_event_kinds=revalidated_kinds,
+        entries=revalidated_entries,
+    )
+    material = {
+        "schema_version": 1,
+        "adapter_fingerprint": _validate_adapter_fingerprint(adapter_fingerprint),
+        "entries": [entry.model_dump(mode="json") for entry in revalidated_entries],
+        "market_timeline_id": _validate_market_timeline_id(
+            market_timeline_id
+        ).model_dump(mode="json"),
+        "replay_plan_id": _trimmed(replay_plan_id, "replay_plan_id"),
+        "replay_timeline_id": _trimmed(replay_timeline_id, "replay_timeline_id"),
+        "supported_event_kinds": [kind.value for kind in revalidated_kinds],
+    }
+    return f"replay-market-frame-lookup-authority:{_sha256_text(_canonical_json(material))}"
+
+
+def build_replay_market_frame_lookup_authority(
+    market_timeline: ReplayMarketFrameTimeline,
+) -> ReplayMarketFrameLookupAuthority:
+    revalidated = _revalidate_model(ReplayMarketFrameTimeline, market_timeline)
+    entries = tuple(
+        build_replay_market_frame_lookup_entry(
+            market_timeline_id=revalidated.market_timeline_id,
+            replay_timeline_id=revalidated.replay_timeline_id,
+            replay_plan_id=revalidated.replay_plan_id,
+            adapter_fingerprint=revalidated.adapter_authority.adapter_fingerprint,
+            observation_projection=observation_projection,
+            frame_projection=frame_projection,
+        )
+        for observation_projection, frame_projection in zip(
+            revalidated.observation_projections,
+            revalidated.frame_projections,
+            strict=True,
+        )
+    )
+    fingerprint = build_replay_market_frame_lookup_authority_fingerprint(
+        market_timeline_id=revalidated.market_timeline_id,
+        replay_timeline_id=revalidated.replay_timeline_id,
+        replay_plan_id=revalidated.replay_plan_id,
+        adapter_fingerprint=revalidated.adapter_authority.adapter_fingerprint,
+        supported_event_kinds=revalidated.adapter_authority.descriptor.supported_input_kinds,
+        entries=entries,
+    )
+    return ReplayMarketFrameLookupAuthority(
+        market_timeline_id=revalidated.market_timeline_id,
+        replay_timeline_id=revalidated.replay_timeline_id,
+        replay_plan_id=revalidated.replay_plan_id,
+        adapter_fingerprint=revalidated.adapter_authority.adapter_fingerprint,
+        supported_event_kinds=revalidated.adapter_authority.descriptor.supported_input_kinds,
+        entries=entries,
+        lookup_authority_fingerprint=fingerprint,
+    )
+
+
+def build_replay_market_frame_lookup_descriptor(
+    authority: ReplayMarketFrameLookupAuthority,
+) -> ReplayMarketFrameLookupDescriptor:
+    revalidated = _revalidate_model(ReplayMarketFrameLookupAuthority, authority)
+    return ReplayMarketFrameLookupDescriptor(
+        market_timeline_id=revalidated.market_timeline_id,
+        replay_timeline_id=revalidated.replay_timeline_id,
+        replay_plan_id=revalidated.replay_plan_id,
+        adapter_fingerprint=revalidated.adapter_fingerprint,
+        lookup_authority_fingerprint=revalidated.lookup_authority_fingerprint,
+        supported_event_kinds=revalidated.supported_event_kinds,
+    )
+
+
+def validate_replay_market_frame_lookup_result(
+    *,
+    descriptor: ReplayMarketFrameLookupDescriptor,
+    entry: ReplayMarketFrameLookupEntry,
+    observation_projection: ReplayMarketObservationProjection,
+    frame_projection: ReplayMarketFrameProjection,
+) -> None:
+    descriptor = _revalidate_model(ReplayMarketFrameLookupDescriptor, descriptor)
+    entry = _revalidate_model(ReplayMarketFrameLookupEntry, entry)
+    observation_projection = _revalidate_model(
+        ReplayMarketObservationProjection,
+        observation_projection,
+    )
+    frame_projection = _revalidate_model(ReplayMarketFrameProjection, frame_projection)
+    if entry.market_timeline_id != descriptor.market_timeline_id:
+        raise ValueError("lookup entry market_timeline_id must match descriptor")
+    if entry.replay_timeline_id != descriptor.replay_timeline_id:
+        raise ValueError("lookup entry replay_timeline_id must match descriptor")
+    if entry.replay_plan_id != descriptor.replay_plan_id:
+        raise ValueError("lookup entry replay_plan_id must match descriptor")
+    if entry.adapter_fingerprint != descriptor.adapter_fingerprint:
+        raise ValueError("lookup entry adapter_fingerprint must match descriptor")
+    _validate_lookup_entry_matches_projection_pair(
+        entry=entry,
+        observation_projection=observation_projection,
+        frame_projection=frame_projection,
+    )
+    _validate_projection_pair(
+        descriptor_replay_timeline_id=descriptor.replay_timeline_id,
+        supported_event_kinds=descriptor.supported_event_kinds,
+        observation_projection=observation_projection,
+        frame_projection=frame_projection,
+    )
+
+
+def validate_replay_market_frame_lookup_membership(
+    *,
+    authority: ReplayMarketFrameLookupAuthority,
+    result: ReplayMarketFrameLookupResult,
+) -> None:
+    authority = _revalidate_model(ReplayMarketFrameLookupAuthority, authority)
+    result = _revalidate_model(ReplayMarketFrameLookupResult, result)
+    expected_descriptor = build_replay_market_frame_lookup_descriptor(authority)
+    if result.descriptor != expected_descriptor:
+        raise ValueError("lookup result descriptor must match lookup authority")
+    entries_by_id = {str(entry.entry_id): entry for entry in authority.entries}
+    authority_entry = entries_by_id.get(str(result.entry.entry_id))
+    if authority_entry is None:
+        raise ValueError("lookup result entry is absent from lookup authority")
+    if authority_entry != result.entry:
+        raise ValueError("lookup result entry differs from lookup authority")
+    validate_replay_market_frame_lookup_result(
+        descriptor=result.descriptor,
+        entry=result.entry,
+        observation_projection=result.observation_projection,
+        frame_projection=result.frame_projection,
+    )
+
+
+def build_replay_market_frame_lookup_result(
+    *,
+    descriptor: ReplayMarketFrameLookupDescriptor,
+    entry: ReplayMarketFrameLookupEntry,
+    observation_projection: ReplayMarketObservationProjection,
+    frame_projection: ReplayMarketFrameProjection,
+) -> ReplayMarketFrameLookupResult:
+    validate_replay_market_frame_lookup_result(
+        descriptor=descriptor,
+        entry=entry,
+        observation_projection=observation_projection,
+        frame_projection=frame_projection,
+    )
+    return ReplayMarketFrameLookupResult(
+        descriptor=descriptor,
+        entry=entry,
+        observation_projection=observation_projection,
+        frame_projection=frame_projection,
     )
 
 
@@ -1143,12 +1737,33 @@ def _validate_market_observation_id(value: object) -> MarketObservationId:
     return observation_id
 
 
+def _validate_market_frame_id(value: object) -> MarketFrameId:
+    frame_id = _revalidate_domain_id(MarketFrameId, value)
+    if not _MARKET_FRAME_ID_RE.fullmatch(str(frame_id)):
+        raise ValueError("invalid market frame ID")
+    return frame_id
+
+
+def _validate_market_timeline_id(value: object) -> ReplayMarketFrameTimelineId:
+    timeline_id = _revalidate_domain_id(ReplayMarketFrameTimelineId, value)
+    if not _TIMELINE_ID_RE.fullmatch(str(timeline_id)):
+        raise ValueError("invalid replay market frame timeline ID")
+    return timeline_id
+
+
 def _validate_observation_projection_id(
     value: object,
 ) -> ReplayMarketObservationProjectionId:
     projection_id = _revalidate_domain_id(ReplayMarketObservationProjectionId, value)
     if not _OBSERVATION_PROJECTION_ID_RE.fullmatch(str(projection_id)):
         raise ValueError("invalid replay market observation projection ID")
+    return projection_id
+
+
+def _validate_frame_projection_id(value: object) -> ReplayMarketFrameProjectionId:
+    projection_id = _revalidate_domain_id(ReplayMarketFrameProjectionId, value)
+    if not _FRAME_PROJECTION_ID_RE.fullmatch(str(projection_id)):
+        raise ValueError("invalid replay market frame projection ID")
     return projection_id
 
 
@@ -1206,6 +1821,16 @@ def _validate_binding_authority_fingerprint(value: str) -> str:
     return value
 
 
+def _validate_lookup_authority_fingerprint(value: str) -> str:
+    value = _trimmed(value, "lookup_authority_fingerprint")
+    if not _LOOKUP_AUTHORITY_FINGERPRINT_RE.fullmatch(value):
+        raise ValueError(
+            "lookup_authority_fingerprint must match "
+            "replay-market-frame-lookup-authority:<64 hex>"
+        )
+    return value
+
+
 def validate_sha256_prefixed(value: str) -> str:
     value = _trimmed(value, "sha256")
     if not _SHA256_RE.fullmatch(value):
@@ -1218,6 +1843,137 @@ def validate_replay_market_connection_id(value: MarketConnectionId) -> MarketCon
     if not _CONNECTION_ID_RE.fullmatch(str(value)):
         raise ValueError("invalid replay market connection ID")
     return value
+
+
+def _validate_projection_pair(
+    *,
+    descriptor_replay_timeline_id: str,
+    supported_event_kinds: tuple[ReplayInputKind, ...],
+    observation_projection: ReplayMarketObservationProjection,
+    frame_projection: ReplayMarketFrameProjection,
+) -> None:
+    descriptor_replay_timeline_id = _trimmed(
+        descriptor_replay_timeline_id,
+        "descriptor_replay_timeline_id",
+    )
+    supported_event_kinds = _validate_market_projection_event_kinds(supported_event_kinds)
+    if observation_projection.timeline_id != descriptor_replay_timeline_id:
+        raise ValueError("lookup observation projection timeline_id must match descriptor")
+    if frame_projection.timeline_id != descriptor_replay_timeline_id:
+        raise ValueError("lookup frame projection timeline_id must match descriptor")
+    if observation_projection.event_id != frame_projection.event_id:
+        raise ValueError("lookup projection event_id values must match")
+    if observation_projection.event_order_index != frame_projection.event_order_index:
+        raise ValueError("lookup projection event_order_index values must match")
+    if observation_projection.event_time != frame_projection.event_time:
+        raise ValueError("lookup projection event_time values must match")
+    if (
+        frame_projection.triggering_observation_projection_id
+        != observation_projection.projection_id
+    ):
+        raise ValueError("lookup frame trigger projection must match observation projection")
+    if (
+        frame_projection.triggering_observation_id
+        != observation_projection.observation.observation_id
+    ):
+        raise ValueError("lookup frame trigger observation must match observation projection")
+    if frame_projection.frame.as_of != observation_projection.event_time:
+        raise ValueError("lookup frame as_of must match observation event_time")
+    if frame_projection.frame.frame_id != _validate_market_frame_id(
+        frame_projection.frame.frame_id
+    ):
+        raise ValueError("lookup frame ID must be valid")
+    if observation_projection.event_kind not in supported_event_kinds:
+        raise ValueError("lookup observation event_kind must be supported")
+
+
+def _validate_lookup_entry_matches_projection_pair(
+    *,
+    entry: ReplayMarketFrameLookupEntry,
+    observation_projection: ReplayMarketObservationProjection,
+    frame_projection: ReplayMarketFrameProjection,
+) -> None:
+    if entry.replay_timeline_id != observation_projection.timeline_id:
+        raise ValueError("lookup entry timeline_id must match observation projection")
+    if entry.replay_timeline_id != frame_projection.timeline_id:
+        raise ValueError("lookup entry timeline_id must match frame projection")
+    if entry.event_id != observation_projection.event_id:
+        raise ValueError("lookup entry event_id must match observation projection")
+    if entry.event_order_index != observation_projection.event_order_index:
+        raise ValueError("lookup entry order index must match observation projection")
+    if entry.event_time != observation_projection.event_time:
+        raise ValueError("lookup entry event_time must match observation projection")
+    if entry.event_kind != observation_projection.event_kind:
+        raise ValueError("lookup entry event_kind must match observation projection")
+    if entry.observation_projection_id != observation_projection.projection_id:
+        raise ValueError("lookup entry observation projection ID must match projection")
+    if entry.frame_projection_id != frame_projection.projection_id:
+        raise ValueError("lookup entry frame projection ID must match projection")
+    if entry.frame_id != frame_projection.frame.frame_id:
+        raise ValueError("lookup entry frame ID must match frame projection")
+    if entry.triggering_observation_id != frame_projection.triggering_observation_id:
+        raise ValueError("lookup entry triggering observation ID must match frame")
+    if (
+        entry.binding_authority_fingerprint
+        != observation_projection.binding_authority.binding_authority_fingerprint
+    ):
+        raise ValueError("lookup entry binding authority must match observation projection")
+
+
+def _validate_lookup_authority_entries(  # noqa: PLR0912, PLR0913
+    *,
+    market_timeline_id: ReplayMarketFrameTimelineId,
+    replay_timeline_id: str,
+    replay_plan_id: str,
+    adapter_fingerprint: str,
+    supported_event_kinds: tuple[ReplayInputKind, ...],
+    entries: tuple[ReplayMarketFrameLookupEntry, ...],
+) -> None:
+    event_ids: set[str] = set()
+    event_order_indexes: set[int] = set()
+    event_keys: set[tuple[str, int]] = set()
+    entry_ids: set[str] = set()
+    observation_projection_ids: set[str] = set()
+    frame_projection_ids: set[str] = set()
+    ordering_keys: list[tuple[int, str]] = []
+    for entry in entries:
+        if entry.market_timeline_id != market_timeline_id:
+            raise ValueError("lookup authority entry market_timeline_id mismatch")
+        if entry.replay_timeline_id != replay_timeline_id:
+            raise ValueError("lookup authority entry replay_timeline_id mismatch")
+        if entry.replay_plan_id != replay_plan_id:
+            raise ValueError("lookup authority entry replay_plan_id mismatch")
+        if entry.adapter_fingerprint != adapter_fingerprint:
+            raise ValueError("lookup authority entry adapter_fingerprint mismatch")
+        if entry.event_kind not in supported_event_kinds:
+            raise ValueError("lookup authority entry event kind is unsupported")
+        entry_id = str(entry.entry_id)
+        if entry_id in entry_ids:
+            raise ValueError("lookup authority entry IDs must be unique")
+        entry_ids.add(entry_id)
+        key = (entry.event_id, entry.event_order_index)
+        if key in event_keys:
+            raise ValueError("lookup authority event keys must be unique")
+        event_keys.add(key)
+        if entry.event_id in event_ids:
+            raise ValueError("lookup authority event IDs must be unique")
+        event_ids.add(entry.event_id)
+        if entry.event_order_index in event_order_indexes:
+            raise ValueError("lookup authority event order indexes must be unique")
+        event_order_indexes.add(entry.event_order_index)
+        observation_projection_id = str(entry.observation_projection_id)
+        if observation_projection_id in observation_projection_ids:
+            raise ValueError("lookup authority observation projection IDs must be unique")
+        observation_projection_ids.add(observation_projection_id)
+        frame_projection_id = str(entry.frame_projection_id)
+        if frame_projection_id in frame_projection_ids:
+            raise ValueError("lookup authority frame projection IDs must be unique")
+        frame_projection_ids.add(frame_projection_id)
+        ordering_keys.append((entry.event_order_index, entry.event_id))
+    if ordering_keys != sorted(ordering_keys):
+        raise ValueError(
+            "lookup authority entries must be sorted by event_order_index and event_id"
+        )
 
 
 def _reject_duplicate_ids(values: tuple[str, ...], field_name: str) -> None:

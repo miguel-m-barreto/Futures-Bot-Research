@@ -8,11 +8,8 @@ from futures_bot.domain.decisions import (
     NoTradeDecision,
 )
 from futures_bot.domain.ids import BotId
-from futures_bot.domain.replay import (
-    ReplayDispatchContext,
-    ReplayInputKind,
-    ReplayTimelineEvent,
-)
+from futures_bot.domain.replay import ReplayInputKind
+from futures_bot.domain.replay_decisions import ReplayDecisionStackContext
 
 type DecisionStackOutput = DecisionIntent | NoTradeDecision
 
@@ -47,8 +44,7 @@ class DecisionStackPort(Protocol):
 
     def decide(
         self,
-        context: ReplayDispatchContext,
-        event: ReplayTimelineEvent,
+        context: ReplayDecisionStackContext,
     ) -> tuple[DecisionStackOutput, ...]:
         """Return one or more explicit deterministic decision outcomes."""
         ...

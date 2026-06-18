@@ -77,6 +77,14 @@ class DecisionIntentId(DomainId):
     pass
 
 
+class ReplayDecisionContextId(DomainId):
+    pass
+
+
+class ReplayDecisionMarketContextReferenceId(DomainId):
+    pass
+
+
 class ExecutionIntentId(DomainId):
     pass
 
@@ -194,4 +202,8 @@ class ReplayMarketFrameProjectionId(DomainId):
 
 
 class ReplayMarketFrameTimelineId(DomainId):
+    pass
+
+
+class ReplayMarketFrameLookupEntryId(DomainId):
     pass

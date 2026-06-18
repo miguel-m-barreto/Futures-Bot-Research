@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import math
+from typing import cast
+
+from pydantic import BaseModel
+
 from futures_bot.domain.decisions import DecisionIntent, NoTradeDecision
 from futures_bot.domain.replay import (
     ReplayDispatchContext,
@@ -10,30 +15,76 @@ from futures_bot.domain.replay import (
 from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
+    ReplayDecisionStackContext,
     ReplayDecisionStackDescriptor,
-    _normalize_decision_data,
+    build_replay_decision_handler_fingerprint,
+    build_replay_decision_market_context_reference,
     build_replay_decision_output_proposal,
+    build_replay_decision_stack_context,
     build_replay_decision_stack_fingerprint,
 )
+from futures_bot.domain.replay_market_data import (
+    ReplayMarketFrameLookupAuthority,
+    ReplayMarketFrameLookupDescriptor,
+    ReplayMarketFrameLookupResult,
+    build_replay_market_frame_lookup_descriptor,
+    validate_replay_market_frame_lookup_membership,
+)
 from futures_bot.ports.decision import DecisionStackOutput, DecisionStackPort
+from futures_bot.ports.market_data import ReplayMarketFrameLookupPort
 
 
 class ReplayDecisionStackHandler:
     """Replay handler adapter for synchronous deterministic DecisionStacks."""
 
-    def __init__(self, decision_stack: DecisionStackPort) -> None:
+    def __init__(
+        self,
+        decision_stack: DecisionStackPort,
+        market_lookup: ReplayMarketFrameLookupPort,
+    ) -> None:
         self._decision_stack = decision_stack
+        self._market_lookup = market_lookup
         descriptor = _descriptor_from_stack(decision_stack)
-        self._descriptor = ReplayDecisionStackDescriptor.model_validate(
-            descriptor.model_dump()
+        self._descriptor = _snapshot_boundary_model(
+            ReplayDecisionStackDescriptor,
+            descriptor,
+            field_name="DecisionStack descriptor",
         )
+        lookup_authority = market_lookup.authority
+        self._market_lookup_authority = _snapshot_boundary_model(
+            ReplayMarketFrameLookupAuthority,
+            lookup_authority,
+            field_name="market lookup authority",
+        )
+        lookup_descriptor = market_lookup.descriptor
+        expected_descriptor = build_replay_market_frame_lookup_descriptor(
+            self._market_lookup_authority
+        )
+        self._market_lookup_descriptor = _snapshot_boundary_model(
+            ReplayMarketFrameLookupDescriptor,
+            lookup_descriptor,
+            field_name="market lookup descriptor",
+        )
+        if self._market_lookup_descriptor != expected_descriptor:
+            raise ValueError("market lookup descriptor must match lookup authority")
+        unsupported = tuple(
+            kind
+            for kind in self._descriptor.supported_event_kinds
+            if kind not in self._market_lookup_descriptor.supported_event_kinds
+        )
+        if unsupported:
+            raise ValueError("DecisionStack event kinds must be supported by market lookup")
         self._decision_stack_fingerprint = build_replay_decision_stack_fingerprint(
             self._descriptor
+        )
+        self._decision_handler_fingerprint = build_replay_decision_handler_fingerprint(
+            stack_descriptor=self._descriptor,
+            market_lookup_descriptor=self._market_lookup_descriptor,
         )
 
     @property
     def handler_id(self) -> str:
-        return self._decision_stack_fingerprint
+        return self._decision_handler_fingerprint
 
     @property
     def handler_version(self) -> str:
@@ -45,28 +96,124 @@ class ReplayDecisionStackHandler:
 
     @property
     def descriptor(self) -> ReplayDecisionStackDescriptor:
-        return ReplayDecisionStackDescriptor.model_validate(self._descriptor.model_dump())
+        return _snapshot_boundary_model(
+            ReplayDecisionStackDescriptor,
+            self._descriptor,
+            field_name="DecisionStack descriptor",
+        )
+
+    @property
+    def market_lookup_descriptor(self) -> ReplayMarketFrameLookupDescriptor:
+        return _snapshot_boundary_model(
+            ReplayMarketFrameLookupDescriptor,
+            self._market_lookup_descriptor,
+            field_name="market lookup descriptor",
+        )
+
+    @property
+    def market_lookup_authority(self) -> ReplayMarketFrameLookupAuthority:
+        return _snapshot_boundary_model(
+            ReplayMarketFrameLookupAuthority,
+            self._market_lookup_authority,
+            field_name="market lookup authority",
+        )
 
     @property
     def decision_stack_fingerprint(self) -> str:
         return self._decision_stack_fingerprint
+
+    @property
+    def decision_handler_fingerprint(self) -> str:
+        return self._decision_handler_fingerprint
 
     def handle(
         self,
         context: ReplayDispatchContext,
         event: ReplayTimelineEvent,
     ) -> tuple[ReplayHandlerOutputProposal, ...]:
-        context = _revalidate_context(context)
-        event = _revalidate_event(event)
-        _validate_context_matches_event(context, event)
+        trusted_context = _revalidate_context(context)
+        trusted_event = _revalidate_event(event)
+        _validate_context_matches_event(trusted_context, trusted_event)
         _require_stack_metadata_unchanged(self._decision_stack, self._descriptor)
-        if event.kind not in self._descriptor.supported_event_kinds:
+        _require_lookup_descriptor_unchanged(
+            self._market_lookup,
+            self._market_lookup_descriptor,
+        )
+        _require_lookup_authority_unchanged(
+            self._market_lookup,
+            self._market_lookup_authority,
+        )
+        if trusted_event.kind not in self._descriptor.supported_event_kinds:
             raise ValueError("DecisionStack does not support replay event kind")
 
-        outputs = self._decision_stack.decide(context, event)
+        lookup_context = _snapshot_boundary_model(
+            ReplayDispatchContext,
+            trusted_context,
+            field_name="lookup dispatch context",
+        )
+        lookup_event = _snapshot_boundary_model(
+            ReplayTimelineEvent,
+            trusted_event,
+            field_name="lookup timeline event",
+        )
+        raw_market = self._market_lookup.lookup(lookup_context, lookup_event)
+        trusted_market = _snapshot_market_lookup_result(raw_market)
+        _validate_market_result_matches_trusted_event(
+            trusted_context=trusted_context,
+            trusted_event=trusted_event,
+            market=trusted_market,
+        )
+        if trusted_market.descriptor != self._market_lookup_descriptor:
+            raise ValueError("market lookup result descriptor changed")
+        validate_replay_market_frame_lookup_membership(
+            authority=self._market_lookup_authority,
+            result=trusted_market,
+        )
+        _require_lookup_descriptor_unchanged(
+            self._market_lookup,
+            self._market_lookup_descriptor,
+        )
+        _require_lookup_authority_unchanged(
+            self._market_lookup,
+            self._market_lookup_authority,
+        )
+        trusted_decision_context = build_replay_decision_stack_context(
+            dispatch_context=trusted_context,
+            event=trusted_event,
+            market=trusted_market,
+        )
+        _require_stack_metadata_unchanged(self._decision_stack, self._descriptor)
+        stack_context = _snapshot_boundary_model(
+            ReplayDecisionStackContext,
+            trusted_decision_context,
+            field_name="DecisionStack invocation context",
+        )
+        if stack_context != trusted_decision_context:
+            raise ValueError("DecisionStack invocation context snapshot changed")
+        if stack_context is trusted_decision_context:
+            raise ValueError("DecisionStack invocation context was not isolated")
+        outputs = self._decision_stack.decide(stack_context)
+        try:
+            post_decide_stack_context = _snapshot_boundary_model(
+                ReplayDecisionStackContext,
+                stack_context,
+                field_name="DecisionStack invocation context",
+            )
+        except Exception as exc:
+            raise ValueError("DecisionStack mutated invocation context") from exc
+        if post_decide_stack_context != trusted_decision_context:
+            raise ValueError("DecisionStack mutated invocation context")
         _require_stack_metadata_unchanged_after_decide(
             self._decision_stack,
             self._descriptor,
+        )
+        _require_lookup_descriptor_unchanged_after_decide(
+            self._market_lookup,
+            self._market_lookup_descriptor,
+        )
+        _require_lookup_authority_unchanged_after_decide(
+            self._market_lookup,
+            self._market_lookup_authority,
         )
         if not isinstance(outputs, tuple):
             raise ValueError("DecisionStack decide() must return a tuple")
@@ -79,7 +226,8 @@ class ReplayDecisionStackHandler:
                 decision = _revalidate_decision_output(output)
                 envelope = _envelope_for_output(
                     descriptor=self._descriptor,
-                    context=context,
+                    market_lookup_descriptor=self._market_lookup_descriptor,
+                    context=trusted_decision_context,
                     decision_index=decision_index,
                     decision=decision,
                 )
@@ -90,6 +238,18 @@ class ReplayDecisionStackHandler:
                     f"for stack {self._descriptor.stack_id!r} "
                     f"at decision index {decision_index}"
                 ) from exc
+        _require_stack_metadata_unchanged_after_decide(
+            self._decision_stack,
+            self._descriptor,
+        )
+        _require_lookup_descriptor_unchanged_after_decide(
+            self._market_lookup,
+            self._market_lookup_descriptor,
+        )
+        _require_lookup_authority_unchanged_after_decide(
+            self._market_lookup,
+            self._market_lookup_authority,
+        )
         return tuple(proposals)
 
 
@@ -123,16 +283,128 @@ def _require_stack_metadata_unchanged_after_decide(
         raise ValueError("DecisionStack metadata changed during invocation")
 
 
+def _require_lookup_descriptor_unchanged(
+    market_lookup: ReplayMarketFrameLookupPort,
+    descriptor: ReplayMarketFrameLookupDescriptor,
+) -> None:
+    current = _snapshot_boundary_model(
+        ReplayMarketFrameLookupDescriptor,
+        market_lookup.descriptor,
+        field_name="market lookup descriptor",
+    )
+    if current != descriptor:
+        raise ValueError("market lookup descriptor changed after handler construction")
+
+
+def _require_lookup_authority_unchanged(
+    market_lookup: ReplayMarketFrameLookupPort,
+    authority: ReplayMarketFrameLookupAuthority,
+) -> None:
+    try:
+        current = _snapshot_boundary_model(
+            ReplayMarketFrameLookupAuthority,
+            market_lookup.authority,
+            field_name="market lookup authority",
+        )
+    except Exception as exc:
+        raise ValueError(
+            "market lookup authority changed after handler construction"
+        ) from exc
+    if current != authority:
+        raise ValueError("market lookup authority changed after handler construction")
+
+
+def _require_lookup_descriptor_unchanged_after_decide(
+    market_lookup: ReplayMarketFrameLookupPort,
+    descriptor: ReplayMarketFrameLookupDescriptor,
+) -> None:
+    current = _snapshot_boundary_model(
+        ReplayMarketFrameLookupDescriptor,
+        market_lookup.descriptor,
+        field_name="market lookup descriptor",
+    )
+    if current != descriptor:
+        raise ValueError("market lookup descriptor changed during invocation")
+
+
+def _require_lookup_authority_unchanged_after_decide(
+    market_lookup: ReplayMarketFrameLookupPort,
+    authority: ReplayMarketFrameLookupAuthority,
+) -> None:
+    try:
+        current = _snapshot_boundary_model(
+            ReplayMarketFrameLookupAuthority,
+            market_lookup.authority,
+            field_name="market lookup authority",
+        )
+    except Exception as exc:
+        raise ValueError("market lookup authority changed during invocation") from exc
+    if current != authority:
+        raise ValueError("market lookup authority changed during invocation")
+
+
 def _revalidate_context(context: object) -> ReplayDispatchContext:
-    if isinstance(context, ReplayDispatchContext):
-        return ReplayDispatchContext.model_validate(context.model_dump())
-    return ReplayDispatchContext.model_validate(context)
+    return _snapshot_boundary_model(
+        ReplayDispatchContext,
+        context,
+        field_name="dispatch context",
+    )
 
 
 def _revalidate_event(event: object) -> ReplayTimelineEvent:
-    if isinstance(event, ReplayTimelineEvent):
-        return ReplayTimelineEvent.model_validate(event.model_dump())
-    return ReplayTimelineEvent.model_validate(event)
+    return _snapshot_boundary_model(
+        ReplayTimelineEvent,
+        event,
+        field_name="timeline event",
+    )
+
+
+def _snapshot_market_lookup_result(value: object) -> ReplayMarketFrameLookupResult:
+    return _snapshot_boundary_model(
+        ReplayMarketFrameLookupResult,
+        value,
+        field_name="market lookup result",
+    )
+
+
+def _snapshot_boundary_model[T: BaseModel](
+    model_type: type[T],
+    value: object,
+    *,
+    field_name: str,
+) -> T:
+    if isinstance(value, model_type):
+        payload = value.model_dump(mode="json")
+    elif type(value) is dict:
+        payload = value
+    else:
+        raise ValueError(f"{field_name} must be a {model_type.__name__} or plain dict")
+    _require_plain_json_tree(payload, path=field_name)
+    snapshot = model_type.model_validate(payload)
+    if type(snapshot) is not model_type:
+        raise ValueError(f"{field_name} snapshot must be exact {model_type.__name__}")
+    return snapshot
+
+
+def _require_plain_json_tree(value: object, *, path: str) -> None:
+    value_type = type(value)
+    if value is None or value_type in {str, int, bool}:
+        return
+    if value_type is float:
+        if not math.isfinite(cast(float, value)):
+            raise ValueError(f"{path} must not contain non-finite floats")
+        return
+    if value_type is dict:
+        for key, nested in cast(dict[object, object], value).items():
+            if type(key) is not str:
+                raise ValueError(f"{path} keys must be strings")
+            _require_plain_json_tree(nested, path=f"{path}.{key}")
+        return
+    if value_type is list:
+        for index, nested in enumerate(cast(list[object], value)):
+            _require_plain_json_tree(nested, path=f"{path}[{index}]")
+        return
+    raise ValueError(f"{path} must be a plain JSON-compatible tree")
 
 
 def _validate_context_matches_event(
@@ -149,14 +421,59 @@ def _validate_context_matches_event(
         raise ValueError("dispatch context event_kind does not match event")
 
 
+def _validate_market_result_matches_trusted_event(
+    *,
+    trusted_context: ReplayDispatchContext,
+    trusted_event: ReplayTimelineEvent,
+    market: ReplayMarketFrameLookupResult,
+) -> None:
+    _validate_context_matches_event(trusted_context, trusted_event)
+    event_values = (
+        ("event_id", market.entry.event_id, trusted_context.event_id),
+        (
+            "event_order_index",
+            market.entry.event_order_index,
+            trusted_context.event_order_index,
+        ),
+        ("event_time", market.entry.event_time, trusted_context.event_time),
+        ("event_kind", market.entry.event_kind, trusted_context.event_kind),
+        ("event_id", market.observation_projection.event_id, trusted_event.event_id),
+        (
+            "event_order_index",
+            market.observation_projection.event_order_index,
+            trusted_event.order_index,
+        ),
+        (
+            "event_time",
+            market.observation_projection.event_time,
+            trusted_event.event_time,
+        ),
+        ("event_kind", market.observation_projection.event_kind, trusted_event.kind),
+        ("event_id", market.frame_projection.event_id, trusted_event.event_id),
+        (
+            "event_order_index",
+            market.frame_projection.event_order_index,
+            trusted_event.order_index,
+        ),
+        ("event_time", market.frame_projection.event_time, trusted_event.event_time),
+    )
+    for field_name, actual, expected in event_values:
+        if actual != expected:
+            raise ValueError(f"market lookup result {field_name} changed")
+
+
 def _revalidate_decision_output(output: object) -> DecisionStackOutput:
     if isinstance(output, DecisionIntent):
-        return DecisionIntent.model_validate(
-            _normalize_decision_data(output.model_dump(mode="json"))
+        return _snapshot_boundary_model(
+            DecisionIntent,
+            output,
+            field_name="DecisionStack DecisionIntent output",
         )
     if isinstance(output, NoTradeDecision):
-        return NoTradeDecision.model_validate(
-            _normalize_decision_data(output.model_dump(mode="json"))
+        return _snapshot_boundary_model(
+            NoTradeDecision,
+            output,
+            field_name="DecisionStack NoTradeDecision output",
         )
     raise ValueError("DecisionStack output must be DecisionIntent or NoTradeDecision")
 
@@ -164,29 +481,46 @@ def _revalidate_decision_output(output: object) -> DecisionStackOutput:
 def _envelope_for_output(
     *,
     descriptor: ReplayDecisionStackDescriptor,
-    context: ReplayDispatchContext,
+    market_lookup_descriptor: ReplayMarketFrameLookupDescriptor,
+    context: ReplayDecisionStackContext,
     decision_index: int,
     decision: DecisionStackOutput,
 ) -> ReplayDecisionOutputEnvelope:
+    dispatch_context = context.dispatch_context
+    market_reference = build_replay_decision_market_context_reference(context)
     if isinstance(decision, DecisionIntent):
         return ReplayDecisionOutputEnvelope(
-            run_id=context.run_id,
-            event_id=context.event_id,
-            event_order_index=context.event_order_index,
-            event_time=context.event_time,
-            event_kind=context.event_kind,
+            run_id=dispatch_context.run_id,
+            manifest_id=dispatch_context.manifest_id,
+            replay_plan_id=dispatch_context.replay_plan_id,
+            timeline_id=dispatch_context.timeline_id,
+            timeline_fingerprint_id=dispatch_context.timeline_fingerprint_id,
+            dispatcher_fingerprint=dispatch_context.dispatcher_fingerprint,
+            event_id=dispatch_context.event_id,
+            event_order_index=dispatch_context.event_order_index,
+            event_time=dispatch_context.event_time,
+            event_kind=dispatch_context.event_kind,
             stack_descriptor=descriptor,
+            market_lookup_descriptor=market_lookup_descriptor,
+            market_context_reference=market_reference,
             decision_index=decision_index,
             decision_kind=ReplayDecisionOutputKind.DECISION_INTENT,
             decision_intent=decision,
         )
     return ReplayDecisionOutputEnvelope(
-        run_id=context.run_id,
-        event_id=context.event_id,
-        event_order_index=context.event_order_index,
-        event_time=context.event_time,
-        event_kind=context.event_kind,
+        run_id=dispatch_context.run_id,
+        manifest_id=dispatch_context.manifest_id,
+        replay_plan_id=dispatch_context.replay_plan_id,
+        timeline_id=dispatch_context.timeline_id,
+        timeline_fingerprint_id=dispatch_context.timeline_fingerprint_id,
+        dispatcher_fingerprint=dispatch_context.dispatcher_fingerprint,
+        event_id=dispatch_context.event_id,
+        event_order_index=dispatch_context.event_order_index,
+        event_time=dispatch_context.event_time,
+        event_kind=dispatch_context.event_kind,
         stack_descriptor=descriptor,
+        market_lookup_descriptor=market_lookup_descriptor,
+        market_context_reference=market_reference,
         decision_index=decision_index,
         decision_kind=ReplayDecisionOutputKind.NO_TRADE_DECISION,
         no_trade_decision=decision,

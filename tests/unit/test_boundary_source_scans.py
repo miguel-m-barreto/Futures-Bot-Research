@@ -968,6 +968,7 @@ def test_replay_market_data_sources_do_not_use_forbidden_runtime_dependencies() 
     source_paths = (
         ROOT / "src/futures_bot/domain/replay_market_data.py",
         ROOT / "src/futures_bot/market_data/replay_adapter.py",
+        ROOT / "src/futures_bot/market_data/replay_lookup.py",
     )
     forbidden = (
         "requests",

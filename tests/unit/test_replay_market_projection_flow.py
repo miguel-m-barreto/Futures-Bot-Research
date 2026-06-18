@@ -142,5 +142,5 @@ def test_replay_market_projection_flow_preserves_existing_boundaries() -> None:
     assert "payload" not in ReplayTimelineEvent.model_fields
     assert "market_frame" not in ReplayDispatchContext.model_fields
     assert replay_instrument.symbol == "BTCUSDT"
-    assert "event" in inspect.signature(DecisionStackPort.decide).parameters
+    assert "event" not in inspect.signature(DecisionStackPort.decide).parameters
     assert "context" in inspect.signature(ReplayDecisionStackHandler.handle).parameters

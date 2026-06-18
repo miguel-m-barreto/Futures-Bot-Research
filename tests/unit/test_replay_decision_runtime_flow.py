@@ -13,9 +13,22 @@ from futures_bot.domain.decisions import (
     ProposedAction,
     TradeSide,
 )
-from futures_bot.domain.ids import BotId
+from futures_bot.domain.ids import (
+    BotId,
+    MarketDataSourceId,
+    ReplayMarketBindingId,
+    VenueInstrumentId,
+)
+from futures_bot.domain.instruments import VenueId
+from futures_bot.domain.market_data import (
+    MarketDataSourceDescriptor,
+    MarketDataSourceKind,
+    MarketTransportKind,
+    QuoteSemantics,
+    VenueInstrumentRef,
+    VenueMarketKind,
+)
 from futures_bot.domain.replay import (
-    ReplayDispatchContext,
     ReplayInputBatch,
     ReplayInputDataset,
     ReplayInputKind,
@@ -26,12 +39,19 @@ from futures_bot.domain.replay import (
     ReplayInstrumentRef,
     ReplayOrderingPolicy,
     ReplayRunStatus,
-    ReplayTimelineEvent,
 )
 from futures_bot.domain.replay_decisions import (
+    ReplayDecisionStackContext,
     ReplayDecisionStackDescriptor,
+    build_replay_decision_handler_fingerprint,
     build_replay_decision_intent_id,
-    build_replay_decision_stack_fingerprint,
+    build_replay_decision_market_context_reference,
+)
+from futures_bot.domain.replay_market_data import (
+    ReplayMarketAdapterDescriptor,
+    ReplayMarketDataBinding,
+    ReplayMarketPayloadHashPolicy,
+    ReplayMarketTimestampPolicy,
 )
 from futures_bot.domain.research import TemporalWindow, TemporalWindowKind
 from futures_bot.infrastructure.replay.in_memory import (
@@ -50,6 +70,8 @@ from futures_bot.infrastructure.replay.in_memory import (
     InMemoryReplayTimelineCursorStore,
     InMemoryReplayTimelineStore,
 )
+from futures_bot.market_data.replay_adapter import build_replay_market_frame_timeline
+from futures_bot.market_data.replay_lookup import LocalReplayMarketFrameLookup
 from futures_bot.replay.dispatch import LocalDeterministicReplayDispatcher
 from futures_bot.replay.integrity import (
     LocalReplayArtifactFingerprintBatchVerifier,
@@ -118,25 +140,30 @@ class _DecisionFlowStack:
 
     def _decision_id(
         self,
-        context: ReplayDispatchContext,
+        context: ReplayDecisionStackContext,
         decision_index: int,
     ) -> object:
+        dispatch_context = context.dispatch_context
         return build_replay_decision_intent_id(
-            run_id=context.run_id,
-            event_order_index=context.event_order_index,
-            event_id=context.event_id,
-            decision_stack_fingerprint=build_replay_decision_stack_fingerprint(
-                self.descriptor()
+            run_id=dispatch_context.run_id,
+            event_order_index=dispatch_context.event_order_index,
+            event_id=dispatch_context.event_id,
+            decision_handler_fingerprint=build_replay_decision_handler_fingerprint(
+                stack_descriptor=self.descriptor(),
+                market_lookup_descriptor=context.market.descriptor,
             ),
+            market_context_reference_id=build_replay_decision_market_context_reference(
+                context
+            ).reference_id,
             decision_index=decision_index,
         )
 
     def decide(
         self,
-        context: ReplayDispatchContext,
-        event: ReplayTimelineEvent,
+        context: ReplayDecisionStackContext,
     ) -> tuple[DecisionIntent | NoTradeDecision, ...]:
         self.calls += 1
+        event = context.event
         return (
             DecisionIntent(
                 decision_intent_id=self._decision_id(context, 0),
@@ -146,9 +173,9 @@ class _DecisionFlowStack:
                 proposed_action=ProposedAction.OPEN_POSITION,
                 source_kind=self.source_kind,
                 source_id=self.stack_id,
-                created_at=context.event_time,
+                created_at=context.event.event_time,
                 confidence="0.6",
-                reason_tags=(f"event-{context.event_order_index}",),
+                reason_tags=(f"event-{context.dispatch_context.event_order_index}",),
             ),
             NoTradeDecision(
                 decision_intent_id=self._decision_id(context, 1),
@@ -156,7 +183,7 @@ class _DecisionFlowStack:
                 instrument=f"{event.instrument.symbol}/USDT",
                 source_kind=self.source_kind,
                 source_id=self.stack_id,
-                created_at=context.event_time,
+                created_at=context.event.event_time,
                 reasons=(NoTradeReasonKind.MARKET_TOO_UNCERTAIN,),
                 notes="explicit alternate outcome",
             ),
@@ -250,8 +277,47 @@ def test_replay_decision_stack_runtime_flow_round_trips_typed_journal() -> None:
         now=lambda: _utc(5),
     ).plan_replay_run("manifest-1", "readiness-1")
 
+    market_timeline = build_replay_market_frame_timeline(
+        replay_timeline=timeline,
+        input_batches=(batch,),
+        descriptor=ReplayMarketAdapterDescriptor(
+            adapter_id="adapter",
+            adapter_version="v1",
+            supported_input_kinds=(ReplayInputKind.MARK_PRICE,),
+            timestamp_policy=ReplayMarketTimestampPolicy.EVENT_TIME_AS_SOURCE_AND_RECEIVED,
+            payload_hash_policy=ReplayMarketPayloadHashPolicy.CANONICAL_REPLAY_RECORD,
+        ),
+        bindings=(
+            ReplayMarketDataBinding(
+                binding_id=ReplayMarketBindingId("binding-1"),
+                input_dataset_id="input-ds-1",
+                replay_instrument=_instrument(),
+                source=MarketDataSourceDescriptor(
+                    source_id=MarketDataSourceId("REPLAY_BINANCE"),
+                    source_kind=MarketDataSourceKind.REPLAY,
+                    provider="replay-fixture",
+                    transport=MarketTransportKind.IN_MEMORY,
+                    venue=VenueId(value="BINANCE"),
+                    source_version="v1",
+                ),
+                venue_instrument=VenueInstrumentRef(
+                    venue_instrument_id=VenueInstrumentId("binance-linear-btcusdt"),
+                    venue=VenueId(value="BINANCE"),
+                    raw_symbol="BTCUSDT",
+                    logical_instrument="BTC/USDT",
+                    market_kind=VenueMarketKind.LINEAR_PERPETUAL,
+                    settlement_asset="USDT",
+                    collateral_asset="USDT",
+                    metadata_version="2026-01",
+                ),
+                quote_semantics=QuoteSemantics.CENTRAL_LIMIT_ORDER_BOOK,
+                binding_version="v1",
+            ),
+        ),
+    )
+    market_lookup = LocalReplayMarketFrameLookup(market_timeline)
     stack = _DecisionFlowStack()
-    handler = ReplayDecisionStackHandler(stack)
+    handler = ReplayDecisionStackHandler(stack, market_lookup)
     dispatcher = LocalDeterministicReplayDispatcher((handler,))
     runtime = LocalDeterministicReplayRuntime(
         manifest_store=manifest_store,

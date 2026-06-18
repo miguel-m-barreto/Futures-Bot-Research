@@ -6,8 +6,9 @@ Raw venue events flow through future venue adapters into typed
 `NormalizedMarketObservation` objects. Source-health monitoring records whether a
 source or stream is live, stale, disconnected, unsupported, or otherwise degraded.
 The pure frame builder then produces a `CrossVenueMarketFrame` for one logical
-instrument and decision time. Future evidence/features and future decision
-context, including future DecisionStack context, may consume those frames.
+instrument and decision time. Replay DecisionStack context may consume
+deterministic replay frames through a lookup boundary; future evidence/features
+remain separate.
 
 ```text
 raw venue events
@@ -16,7 +17,7 @@ raw venue events
 -> source-health monitoring
 -> CrossVenueMarketFrame
 -> future EvidenceSet/features
--> future DecisionStack context
+-> replay DecisionStack context lookup
 ```
 
 The source is where data was received from. The venue is where the market or
@@ -56,6 +57,18 @@ This does not claim real receive latency and is unsuitable for real latency or
 lead-lag measurement.
 
 Replay market frames are generated in replay timeline order. Same-timestamp
-later events do not enter earlier frames. The projection does not fabricate
-source-health state; replay source-health events and future decision context are
-separate future work.
+later events do not enter earlier frames. `LocalReplayMarketFrameLookup` indexes
+the validated `ReplayMarketFrameTimeline` by `(event_id, event_order_index)` and
+returns the exact paired observation/frame projections for a replay event
+boundary. The generic replay runtime and dispatcher remain market-agnostic.
+
+`ReplayDecisionStackHandler` performs the lookup inside the decision handler
+boundary and passes a `ReplayDecisionStackContext` to the DecisionStack. Decision
+outputs store compact context references: market timeline ID, adapter
+fingerprint, projection IDs, frame ID, triggering observation ID, and binding
+authority fingerprint. They do not duplicate the complete market frame or all
+observation payloads in the journal.
+
+The projection does not fabricate source-health state. RiskBehaviorModel,
+HardRiskGate, execution, live APIs, feature pipelines, EvidenceSet generation,
+and replay source-health events remain future boundaries.
