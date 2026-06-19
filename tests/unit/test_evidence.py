@@ -7,6 +7,8 @@ from futures_bot.domain.evidence import (
     EvidenceDirection,
     EvidenceSet,
     EvidenceSourceKind,
+    MarketEvidenceItem,
+    MarketEvidenceSet,
     TechnicalEvidence,
 )
 from futures_bot.domain.ids import EvidenceId
@@ -127,3 +129,8 @@ def test_evidence_models_model_dump_round_trip_and_tampering() -> None:
     tampered = evidence.model_copy(update={"instrument": {"value": "btcusd"}})
     with pytest.raises(ValidationError):
         EvidenceSet(instrument="BTC/USD", evidence=(tampered,))
+
+
+def test_market_evidence_contracts_are_separate_from_technical_evidence() -> None:
+    assert not issubclass(MarketEvidenceItem, TechnicalEvidence)
+    assert MarketEvidenceSet is not EvidenceSet

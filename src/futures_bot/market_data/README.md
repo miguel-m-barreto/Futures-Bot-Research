@@ -7,8 +7,9 @@ Raw venue events flow through future venue adapters into typed
 source or stream is live, stale, disconnected, unsupported, or otherwise degraded.
 The pure frame builder then produces a `CrossVenueMarketFrame` for one logical
 instrument and decision time. Replay DecisionStack context may consume
-deterministic replay frames through a lookup boundary; future evidence/features
-remain separate.
+deterministic replay frames through a lookup boundary. Factual
+`MarketEvidenceSet` generation is a separate frame-derived boundary, and
+DecisionStack evidence integration remains deferred.
 
 ```text
 raw venue events
@@ -16,7 +17,7 @@ raw venue events
 -> NormalizedMarketObservation
 -> source-health monitoring
 -> CrossVenueMarketFrame
--> future EvidenceSet/features
+-> MarketEvidenceSet/features
 -> replay DecisionStack context lookup
 ```
 
@@ -70,5 +71,18 @@ authority fingerprint. They do not duplicate the complete market frame or all
 observation payloads in the journal.
 
 The projection does not fabricate source-health state. RiskBehaviorModel,
-HardRiskGate, execution, live APIs, feature pipelines, EvidenceSet generation,
-and replay source-health events remain future boundaries.
+HardRiskGate, execution, live APIs, feature pipelines, DecisionStack evidence
+context integration, and replay source-health events remain future boundaries.
+
+## Factual Market Evidence
+
+`MarketEvidenceSet` is factual and frame-derived. It embeds the complete
+`CrossVenueMarketFrame` as derivation authority and emits only direct-field
+items from observation payloads and source-health snapshots. It does not read
+future data and does not fabricate source health when a frame has no
+`source_health`.
+
+No midpoint, spread, basis, lead-lag, imbalance, microprice, or executable-edge
+evidence is calculated yet. `TechnicalEvidence` remains a separate analytical
+contract. Market evidence is not a target, decision, risk verdict, recommended
+side, action, or order.

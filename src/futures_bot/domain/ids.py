@@ -105,6 +105,14 @@ class EvidenceId(DomainId):
     pass
 
 
+class MarketEvidenceItemId(DomainId):
+    pass
+
+
+class MarketEvidenceSetId(DomainId):
+    pass
+
+
 class CandidateId(DomainId):
     pass
 

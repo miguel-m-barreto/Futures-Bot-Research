@@ -1003,3 +1003,47 @@ def test_replay_market_data_sources_do_not_use_forbidden_runtime_dependencies() 
         source = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_market_evidence_sources_do_not_use_forbidden_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/evidence.py",
+        ROOT / "src/futures_bot/evidence/frame_builder.py",
+        ROOT / "src/futures_bot/ports/evidence.py",
+    )
+    forbidden = (
+        "DecisionStack",
+        "ReplayDecisionStackContext",
+        "DecisionIntent",
+        "NoTradeDecision",
+        "RiskBehaviorModel",
+        "HardRiskGate",
+        "ExecutionIntent",
+        "OrderIntent",
+        "Ledger",
+        "PnL",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "asyncio",
+        "threading",
+        "subprocess",
+        "Kafka",
+        "Postgres",
+        "SQLAlchemy",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
