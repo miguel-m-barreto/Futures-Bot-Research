@@ -215,3 +215,11 @@ class ReplayMarketFrameTimelineId(DomainId):
 
 class ReplayMarketFrameLookupEntryId(DomainId):
     pass
+
+
+class ReplayMarketEvidenceProjectionId(DomainId):
+    pass
+
+
+class ReplayMarketEvidenceTimelineId(DomainId):
+    pass

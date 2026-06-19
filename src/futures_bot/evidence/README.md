@@ -19,3 +19,17 @@ confidence. Those require explicit deterministic derivation policies.
 contracts. Factual market evidence is not a target, decision, risk verdict,
 order, recommended side, or execution instruction. DecisionStack integration is
 deferred.
+
+## Replay Projection Timeline
+
+`ReplayMarketEvidenceTimeline` is the deterministic replay artifact for factual
+market evidence. It projects one `MarketEvidenceSet` from each
+`ReplayMarketFrameProjection` in a validated `ReplayMarketFrameTimeline`.
+
+The `ReplayMarketFrameLookupAuthority` is the membership authority. Every
+evidence projection embeds the lookup descriptor, the exact lookup entry, the
+exact market frame projection, and the derived evidence set.
+
+The evidence timeline embeds projections, not decision outputs. DecisionStack
+integration is deferred; a future evidence lookup can reference this timeline by
+replay event and pass compact evidence-set references into decision context.

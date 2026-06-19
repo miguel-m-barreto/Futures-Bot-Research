@@ -298,6 +298,52 @@ def test_decision_port_does_not_import_infrastructure() -> None:
     assert not any("infrastructure" in line for line in lines)
 
 
+def test_replay_evidence_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/replay_evidence.py",
+        ROOT / "src/futures_bot/evidence/replay_projection.py",
+        ROOT / "src/futures_bot/ports/evidence.py",
+    )
+    forbidden = (
+        "DecisionStack",
+        "ReplayDecisionStackContext",
+        "DecisionIntent",
+        "NoTradeDecision",
+        "RiskBehaviorModel",
+        "HardRiskGate",
+        "ExecutionIntent",
+        "OrderIntent",
+        "Ledger",
+        "PnL",
+        "ReplayDecisionOutputEnvelope",
+        "ReplayDecisionMarketContextReference",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "asyncio",
+        "threading",
+        "subprocess",
+        "Kafka",
+        "Postgres",
+        "SQLAlchemy",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
 def test_replay_timeline_test_files_do_not_import_forbidden_dependencies() -> None:
     timeline_test_files = (
         ROOT / "tests/unit/test_replay_timeline_domain.py",
