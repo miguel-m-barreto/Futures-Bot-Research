@@ -301,6 +301,7 @@ def test_decision_port_does_not_import_infrastructure() -> None:
 def test_replay_evidence_source_files_do_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/replay_evidence.py",
+        ROOT / "src/futures_bot/evidence/replay_lookup.py",
         ROOT / "src/futures_bot/evidence/replay_projection.py",
         ROOT / "src/futures_bot/ports/evidence.py",
     )

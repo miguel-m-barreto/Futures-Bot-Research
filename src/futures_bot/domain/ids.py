@@ -223,3 +223,7 @@ class ReplayMarketEvidenceProjectionId(DomainId):
 
 class ReplayMarketEvidenceTimelineId(DomainId):
     pass
+
+
+class ReplayMarketEvidenceLookupEntryId(DomainId):
+    pass

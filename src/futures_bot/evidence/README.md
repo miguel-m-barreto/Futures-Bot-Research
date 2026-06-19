@@ -33,3 +33,20 @@ exact market frame projection, and the derived evidence set.
 The evidence timeline embeds projections, not decision outputs. DecisionStack
 integration is deferred; a future evidence lookup can reference this timeline by
 replay event and pass compact evidence-set references into decision context.
+
+## Replay Evidence Lookup
+
+`ReplayMarketEvidenceLookupAuthority` is the deterministic membership authority
+for looking up evidence by replay event. It contains compact lookup entries
+derived from a `ReplayMarketEvidenceTimeline`, with one entry per evidence
+projection.
+
+`ReplayMarketEvidenceLookupDescriptor` is the compact boundary descriptor. It
+binds the evidence timeline, replay timeline, replay plan, market-frame lookup
+authority fingerprint, evidence builder fingerprint, and supported event kinds
+without embedding every entry.
+
+`LocalReplayMarketEvidenceLookup` accepts a `ReplayDispatchContext` and matching
+`ReplayTimelineEvent`, then returns a `ReplayMarketEvidenceLookupResult` proving
+the compact entry and complete projection agree. No evidence is passed to
+DecisionStack yet; a future sprint will add a compact evidence context reference.
