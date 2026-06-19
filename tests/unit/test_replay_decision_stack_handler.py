@@ -17,6 +17,7 @@ from tests.unit.replay_decision_market_fixtures import (
 from futures_bot.decision.journal import LocalReplayDecisionJournal
 from futures_bot.decision.replay_adapter import (
     ReplayDecisionStackHandler,
+    _snapshot_evidence_lookup_result,
     _snapshot_market_lookup_result,
 )
 from futures_bot.domain.decisions import (
@@ -41,12 +42,15 @@ from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
     ReplayDecisionStackContext,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_handler_fingerprint,
     build_replay_decision_intent_id,
     build_replay_decision_market_context_reference,
     build_replay_decision_stack_context,
-    build_replay_decision_stack_context_id,
     decode_replay_decision_output_record,
+)
+from futures_bot.domain.replay_evidence import (
+    ReplayMarketEvidenceLookupResult,
 )
 from futures_bot.domain.replay_market_data import (
     ReplayMarketFrameLookupAuthority,
@@ -95,7 +99,56 @@ class _LookupSpy:
         return self._result
 
 
+class _EvidenceLookupSpy:
+    def __init__(self, fixture) -> None:
+        self._authority = fixture.evidence_lookup.authority
+        self._descriptor = fixture.evidence_lookup.descriptor
+        self._result = fixture.decision_context.evidence
+        self.calls = 0
+        self.mutate_descriptor = False
+        self.mutate_authority = False
+        self.mutate_descriptor_during_lookup = False
+        self.mutate_authority_during_lookup = False
+        self.on_lookup: Callable[[ReplayDispatchContext, ReplayTimelineEvent], None] | None = (
+            None
+        )
+
+    @property
+    def authority(self):
+        if self.mutate_authority:
+            return self._authority.model_copy(update={"replay_plan_id": "other-plan"})
+        return self._authority
+
+    @property
+    def descriptor(self):
+        if self.mutate_descriptor:
+            return self._descriptor.model_copy(update={"replay_plan_id": "other-plan"})
+        return self._descriptor
+
+    def lookup(self, context, event):
+        self.calls += 1
+        if self.on_lookup is not None:
+            self.on_lookup(context, event)
+        if self.mutate_descriptor_during_lookup:
+            self.mutate_descriptor = True
+        if self.mutate_authority_during_lookup:
+            self.mutate_authority = True
+        return self._result
+
+
 class _StatefulLookupResult(ReplayMarketFrameLookupResult):
+    dump_count: int = 0
+    first_payload: object
+    later_payload: object
+
+    def model_dump(self, *args, **kwargs):
+        object.__setattr__(self, "dump_count", self.dump_count + 1)
+        if self.dump_count == 1:
+            return self.first_payload
+        return self.later_payload
+
+
+class _StatefulEvidenceLookupResult(ReplayMarketEvidenceLookupResult):
     dump_count: int = 0
     first_payload: object
     later_payload: object
@@ -335,8 +388,12 @@ def decision_id_for_context(context: ReplayDecisionStackContext, index: int):
         decision_handler_fingerprint=build_replay_decision_handler_fingerprint(
             stack_descriptor=descriptor,
             market_lookup_descriptor=context.market.descriptor,
+            evidence_lookup_descriptor=context.evidence.descriptor,
         ),
         market_context_reference_id=build_replay_decision_market_context_reference(
+            context
+        ).reference_id,
+        evidence_context_reference_id=build_replay_decision_evidence_context_reference(
             context
         ).reference_id,
         decision_index=index,
@@ -346,9 +403,10 @@ def decision_id_for_context(context: ReplayDecisionStackContext, index: int):
 def _handler_bundle():
     fixture = replay_decision_market_fixture()
     lookup = _LookupSpy(fixture)
+    evidence_lookup = _EvidenceLookupSpy(fixture)
     stack = _Stack(fixture)
-    handler = ReplayDecisionStackHandler(stack, lookup)
-    return fixture, lookup, stack, handler
+    handler = ReplayDecisionStackHandler(stack, lookup, evidence_lookup)
+    return fixture, lookup, evidence_lookup, stack, handler
 
 
 def test_snapshot_market_lookup_result_accepts_base_mapping_and_subclass_once() -> None:
@@ -368,6 +426,27 @@ def test_snapshot_market_lookup_result_accepts_base_mapping_and_subclass_once() 
     assert type(from_base) is ReplayMarketFrameLookupResult
     assert type(from_mapping) is ReplayMarketFrameLookupResult
     assert type(from_subclass) is ReplayMarketFrameLookupResult
+    assert from_subclass == result
+    assert stateful.dump_count == 1
+
+
+def test_snapshot_evidence_lookup_result_accepts_base_mapping_and_subclass_once() -> None:
+    fixture = replay_decision_market_fixture()
+    result = fixture.decision_context.evidence
+    from_base = _snapshot_evidence_lookup_result(result)
+    from_mapping = _snapshot_evidence_lookup_result(result.model_dump(mode="json"))
+    changed = replay_decision_market_fixture(price="101")
+    stateful = _StatefulEvidenceLookupResult(
+        **result.model_dump(mode="json"),
+        first_payload=result.model_dump(mode="json"),
+        later_payload=changed.decision_context.evidence.model_dump(mode="json"),
+    )
+
+    from_subclass = _snapshot_evidence_lookup_result(stateful)
+
+    assert type(from_base) is ReplayMarketEvidenceLookupResult
+    assert type(from_mapping) is ReplayMarketEvidenceLookupResult
+    assert type(from_subclass) is ReplayMarketEvidenceLookupResult
     assert from_subclass == result
     assert stateful.dump_count == 1
 
@@ -486,22 +565,24 @@ def test_snapshot_market_lookup_result_requires_exact_plain_dict_mapping() -> No
 
 
 def test_handler_structurally_conforms_and_snapshots_descriptors() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
 
     assert handler.handler_id == build_replay_decision_handler_fingerprint(
         stack_descriptor=fixture.stack_descriptor,
         market_lookup_descriptor=lookup.descriptor,
+        evidence_lookup_descriptor=evidence_lookup.descriptor,
     )
     assert handler.decision_stack_fingerprint.startswith("decision-stack:")
     assert handler.handler_version == fixture.stack_descriptor.stack_version
     assert handler.market_lookup_descriptor == lookup.descriptor
+    assert handler.evidence_lookup_descriptor == evidence_lookup.descriptor
 
     stack.stack_version = "2"
     assert handler.handler_version == "1"
 
 
 def test_lookup_called_once_and_stack_receives_exact_frame() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (
         stack.intent(fixture.decision_context, 0),
         stack.no_trade(fixture.decision_context, 1),
@@ -510,10 +591,14 @@ def test_lookup_called_once_and_stack_receives_exact_frame() -> None:
     proposals = handler.handle(fixture.dispatch_context, fixture.event)
 
     assert lookup.calls == 1
+    assert evidence_lookup.calls == 1
     assert stack.calls == 1
     assert stack.received is not None
     assert stack.received.market.frame_projection.frame == (
         fixture.decision_context.market.frame_projection.frame
+    )
+    assert stack.received.evidence.projection.evidence_set == (
+        fixture.decision_context.evidence.projection.evidence_set
     )
     assert [proposal.output_kind for proposal in proposals] == [
         ReplayDecisionOutputKind.DECISION_INTENT.value,
@@ -521,8 +606,79 @@ def test_lookup_called_once_and_stack_receives_exact_frame() -> None:
     ]
 
 
+@pytest.mark.parametrize("field_name", ("descriptor", "authority"))
+def test_evidence_lookup_metadata_mutation_before_lookup_rejected_without_stack_call(
+    field_name: str,
+) -> None:
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
+    stack.outputs = (stack.intent(fixture.decision_context),)
+    setattr(evidence_lookup, f"mutate_{field_name}", True)
+
+    with pytest.raises(ValueError, match=f"evidence lookup {field_name} changed"):
+        handler.handle(fixture.dispatch_context, fixture.event)
+
+    assert lookup.calls == 0
+    assert evidence_lookup.calls == 0
+    assert stack.calls == 0
+
+
+@pytest.mark.parametrize("field_name", ("descriptor", "authority"))
+def test_evidence_lookup_metadata_mutation_during_lookup_rejected_before_stack_call(
+    field_name: str,
+) -> None:
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
+    stack.outputs = (stack.intent(fixture.decision_context),)
+    setattr(evidence_lookup, f"mutate_{field_name}_during_lookup", True)
+
+    with pytest.raises(ValueError, match=f"evidence lookup {field_name} changed"):
+        handler.handle(fixture.dispatch_context, fixture.event)
+
+    assert lookup.calls == 1
+    assert evidence_lookup.calls == 1
+    assert stack.calls == 0
+
+
+def test_handler_rejects_evidence_lookup_result_from_another_frame_before_stack() -> None:
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
+    changed = replay_decision_market_fixture(price="101")
+    evidence_lookup._result = changed.decision_context.evidence
+    stack.outputs = (stack.intent(fixture.decision_context),)
+
+    with pytest.raises(ValueError, match=r"descriptor changed|market lookup entry"):
+        handler.handle(fixture.dispatch_context, fixture.event)
+
+    assert lookup.calls == 1
+    assert evidence_lookup.calls == 1
+    assert stack.calls == 0
+
+
+def test_stack_decision_with_correct_market_but_wrong_evidence_id_rejected() -> None:
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
+    wrong_id = build_replay_decision_intent_id(
+        run_id=fixture.dispatch_context.run_id,
+        event_order_index=fixture.dispatch_context.event_order_index,
+        event_id=fixture.dispatch_context.event_id,
+        decision_handler_fingerprint=fixture.handler_fingerprint,
+        market_context_reference_id=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ).reference_id,
+        evidence_context_reference_id=(
+            "replay-decision-evidence-context-reference:" + "1" * 64
+        ),
+        decision_index=0,
+    )
+    stack.outputs = (
+        stack.intent(fixture.decision_context, decision_intent_id=wrong_id),
+    )
+
+    with pytest.raises(ValueError, match="decision index 0"):
+        handler.handle(fixture.dispatch_context, fixture.event)
+
+    assert stack.calls == 1
+
+
 def test_lookup_context_run_id_mutation_does_not_reach_stack_or_envelope() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.output_factory = lambda context: (stack.intent(context),)
     lookup.on_lookup = lambda context, _event: object.__setattr__(
         context,
@@ -554,7 +710,7 @@ def test_lookup_event_metadata_mutation_does_not_reach_stack(
     field_name: str,
     value: object,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.output_factory = lambda context: (stack.intent(context),)
     lookup.on_lookup = lambda _context, event: object.__setattr__(
         event,
@@ -577,11 +733,12 @@ def test_lookup_event_metadata_mutation_does_not_reach_stack(
 
 
 def test_decision_stack_receives_isolated_context_copy() -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     expected_context = build_replay_decision_stack_context(
         dispatch_context=fixture.dispatch_context,
         event=fixture.event,
         market=fixture.decision_context.market,
+        evidence=fixture.decision_context.evidence,
     )
     stack.output_factory = lambda context: (stack.intent(context),)
 
@@ -601,15 +758,16 @@ def test_decision_stack_receives_isolated_context_copy() -> None:
 def test_constructor_rejects_stack_kinds_not_supported_by_lookup() -> None:
     fixture = replay_decision_market_fixture()
     lookup = _LookupSpy(fixture)
+    evidence_lookup = _EvidenceLookupSpy(fixture)
     stack = _Stack(fixture)
     stack.supported_event_kinds = (*stack.supported_event_kinds, ReplayInputKind.TRADE)
 
     with pytest.raises(ValueError, match="supported"):
-        ReplayDecisionStackHandler(stack, lookup)
+        ReplayDecisionStackHandler(stack, lookup, evidence_lookup)
 
 
 def test_unsupported_event_rejected_before_lookup_and_stack() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     unsupported_event = fixture.event.model_copy(update={"kind": ReplayInputKind.TRADE})
     unsupported_context = fixture.dispatch_context.model_copy(
         update={"event_kind": ReplayInputKind.TRADE}
@@ -628,7 +786,7 @@ def test_context_and_event_subclasses_rejected_before_lookup(
     field_name: str,
     payload_kind: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     if field_name == "context":
         attacker = _dispatch_context_attacker(
             fixture.dispatch_context,
@@ -655,7 +813,7 @@ def test_context_and_event_subclasses_rejected_before_lookup(
 
 
 def test_empty_non_tuple_wrong_id_and_wrong_status_are_rejected() -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
 
     with pytest.raises(ValueError, match="at least one"):
         handler.handle(fixture.dispatch_context, fixture.event)
@@ -684,7 +842,7 @@ def test_decision_output_subclass_dump_rejected_as_invalid_output(
     decision_kind: str,
     payload_kind: str,
 ) -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     if decision_kind == "intent":
         base = stack.intent(fixture.decision_context)
         attacker = _decision_intent_attacker(
@@ -714,7 +872,7 @@ def test_output_model_dump_metadata_side_effect_rejected_before_return(
     decision_kind: str,
     mutation_target: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
 
     def mutate() -> None:
         if mutation_target == "stack":
@@ -740,7 +898,7 @@ def test_output_model_dump_metadata_side_effect_rejected_before_return(
 
 
 def test_second_output_side_effect_rejects_without_partial_dispatch_or_journal() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
     dispatcher = LocalDeterministicReplayDispatcher((handler,))
     dispatch_context = fixture.dispatch_context.model_copy(
         update={"dispatcher_fingerprint": dispatcher.dispatcher_fingerprint}
@@ -749,6 +907,7 @@ def test_second_output_side_effect_rejects_without_partial_dispatch_or_journal()
         dispatch_context=dispatch_context,
         event=fixture.event,
         market=lookup.lookup(dispatch_context, fixture.event),
+        evidence=evidence_lookup.lookup(dispatch_context, fixture.event),
     )
     lookup.calls = 0
     first = stack.intent(decision_context, 0)
@@ -780,7 +939,7 @@ def test_second_output_side_effect_rejects_without_partial_dispatch_or_journal()
 
 
 def test_invalid_second_output_rejects_without_partial_dispatch_or_journal() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, evidence_lookup, stack, handler = _handler_bundle()
     dispatcher = LocalDeterministicReplayDispatcher((handler,))
     dispatch_context = fixture.dispatch_context.model_copy(
         update={"dispatcher_fingerprint": dispatcher.dispatcher_fingerprint}
@@ -789,6 +948,7 @@ def test_invalid_second_output_rejects_without_partial_dispatch_or_journal() -> 
         dispatch_context=dispatch_context,
         event=fixture.event,
         market=lookup.lookup(dispatch_context, fixture.event),
+        evidence=evidence_lookup.lookup(dispatch_context, fixture.event),
     )
     lookup.calls = 0
     stack.outputs = (
@@ -822,7 +982,7 @@ def test_invalid_second_output_rejects_without_partial_dispatch_or_journal() -> 
 
 
 def test_stack_exception_propagates_exact_instance() -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     error = RuntimeError("stack exploded")
     stack.exception = error
 
@@ -834,20 +994,20 @@ def test_stack_exception_propagates_exact_instance() -> None:
 
 
 def test_stack_and_lookup_metadata_mutation_rejected() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
 
     stack.stack_id = "other"
     with pytest.raises(ValueError, match="metadata changed"):
         handler.handle(fixture.dispatch_context, fixture.event)
 
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     lookup.mutate_descriptor = True
     with pytest.raises(ValueError, match="lookup descriptor changed"):
         handler.handle(fixture.dispatch_context, fixture.event)
 
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     stack.mutate_during_decide = ("stack_id", "other")
     with pytest.raises(ValueError, match="during invocation"):
@@ -868,7 +1028,7 @@ def test_stack_descriptor_field_mutation_before_decide_rejected_without_stack_ca
     field_name: str,
     value: object,
 ) -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     setattr(stack, field_name, value)
 
@@ -892,7 +1052,7 @@ def test_stack_descriptor_field_mutation_during_decide_rejected_after_stack_call
     field_name: str,
     value: object,
 ) -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     stack.mutate_during_decide = (field_name, value)
 
@@ -903,24 +1063,15 @@ def test_stack_descriptor_field_mutation_during_decide_rejected_after_stack_call
 
 
 def test_stack_context_market_replacement_rejected_before_output_escape() -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     changed = replay_decision_market_fixture(price="101")
     forged_market = _forged_result_for_authority(fixture, changed)
 
     def mutate_context(context: ReplayDecisionStackContext) -> None:
         object.__setattr__(context, "market", forged_market)
-        object.__setattr__(
-            context,
-            "context_id",
-            build_replay_decision_stack_context_id(
-                dispatch_context=context.dispatch_context,
-                event=context.event,
-                market=forged_market,
-            ),
-        )
 
     stack.on_decide_context = mutate_context
-    stack.output_factory = lambda context: (stack.intent(context),)
+    stack.output_factory = lambda _context: (stack.intent(fixture.decision_context),)
 
     with pytest.raises(ValueError, match="mutated invocation context"):
         handler.handle(fixture.dispatch_context, fixture.event)
@@ -934,7 +1085,7 @@ def test_stack_context_market_replacement_rejected_before_output_escape() -> Non
 def test_lookup_metadata_mutation_before_lookup_rejected_without_stack_call(
     field_name: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     setattr(lookup, f"mutate_{field_name}", True)
 
@@ -949,7 +1100,7 @@ def test_lookup_metadata_mutation_before_lookup_rejected_without_stack_call(
 def test_lookup_metadata_mutation_during_lookup_rejected_before_stack_call(
     field_name: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     setattr(lookup, f"mutate_{field_name}_during_lookup", True)
 
@@ -974,7 +1125,7 @@ def test_lookup_mutating_stack_metadata_rejected_before_decide(
     field_name: str,
     value: object,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.output_factory = lambda context: (stack.intent(context),)
     lookup.on_lookup = lambda _context, _event: setattr(stack, field_name, value)
 
@@ -993,6 +1144,7 @@ def test_lookup_metadata_subclass_dump_rejected_at_construction(
 ) -> None:
     fixture = replay_decision_market_fixture()
     lookup = _LookupSpy(fixture)
+    evidence_lookup = _EvidenceLookupSpy(fixture)
     stack = _Stack(fixture)
     base = getattr(lookup, field_name)
     if payload_kind == "self":
@@ -1013,7 +1165,7 @@ def test_lookup_metadata_subclass_dump_rejected_at_construction(
     setattr(lookup, f"_{field_name}", attacker)
 
     with pytest.raises(ValueError):
-        ReplayDecisionStackHandler(stack, lookup)
+        ReplayDecisionStackHandler(stack, lookup, evidence_lookup)
 
     assert lookup.calls == 0
     assert stack.calls == 0
@@ -1024,7 +1176,7 @@ def test_lookup_metadata_subclass_dump_rejected_at_construction(
 def test_lookup_metadata_subclass_dump_rejected_before_lookup(
     field_name: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     base = getattr(lookup, field_name)
     attacker = _lookup_metadata_attacker(field_name, base, return_self=True)
     setattr(lookup, f"_{field_name}", attacker)
@@ -1042,7 +1194,7 @@ def test_lookup_metadata_subclass_dump_rejected_before_lookup(
 def test_lookup_metadata_mutation_during_decide_rejected_after_stack_call(
     field_name: str,
 ) -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     stack.outputs = (stack.intent(fixture.decision_context),)
     stack.on_decide = lambda: setattr(lookup, f"mutate_{field_name}", True)
 
@@ -1054,7 +1206,7 @@ def test_lookup_metadata_mutation_during_decide_rejected_after_stack_call(
 
 
 def test_handler_rejects_forged_lookup_result_before_stack_call() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     changed = replay_decision_market_fixture(price="101")
     forged_entry = build_replay_market_frame_lookup_entry(
         market_timeline_id=lookup.authority.market_timeline_id,
@@ -1078,7 +1230,7 @@ def test_handler_rejects_forged_lookup_result_before_stack_call() -> None:
 
 
 def test_handler_snapshots_subclass_result_once_and_never_uses_forged_later_dump() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     changed = replay_decision_market_fixture(price="101")
     stateful = _StatefulLookupResult(
         **fixture.decision_context.market.model_dump(mode="json"),
@@ -1099,7 +1251,7 @@ def test_handler_snapshots_subclass_result_once_and_never_uses_forged_later_dump
 
 
 def test_handler_rejects_self_dumping_lookup_result_before_stack_call() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     changed = replay_decision_market_fixture(price="101")
     stateful = _SelfThenChangingLookupResult(
         **fixture.decision_context.market.model_dump(mode="json"),
@@ -1118,7 +1270,7 @@ def test_handler_rejects_self_dumping_lookup_result_before_stack_call() -> None:
 
 
 def test_handler_rejects_subclass_result_with_forged_first_dump_before_stack_call() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     changed = replay_decision_market_fixture(price="101")
     forged = _forged_result_for_authority(fixture, changed)
     stateful = _StatefulLookupResult(
@@ -1137,7 +1289,7 @@ def test_handler_rejects_subclass_result_with_forged_first_dump_before_stack_cal
 
 
 def test_handler_rejects_arbitrary_lookup_object_without_invoking_validation_trap() -> None:
-    fixture, lookup, stack, handler = _handler_bundle()
+    fixture, lookup, _evidence_lookup, stack, handler = _handler_bundle()
     trap = _ValidationTrap()
     lookup._result = trap
     stack.outputs = (stack.intent(fixture.decision_context),)
@@ -1150,8 +1302,8 @@ def test_handler_rejects_arbitrary_lookup_object_without_invoking_validation_tra
     assert trap.model_validate_calls == 0
 
 
-def test_dispatcher_records_decode_back_to_typed_v2_envelopes() -> None:
-    fixture, _lookup, stack, handler = _handler_bundle()
+def test_dispatcher_records_decode_back_to_typed_v3_envelopes() -> None:
+    fixture, _lookup, _evidence_lookup, stack, handler = _handler_bundle()
     dispatcher = LocalDeterministicReplayDispatcher((handler,))
     context = fixture.dispatch_context.model_copy(
         update={"dispatcher_fingerprint": dispatcher.dispatcher_fingerprint}
@@ -1160,6 +1312,7 @@ def test_dispatcher_records_decode_back_to_typed_v2_envelopes() -> None:
         dispatch_context=context,
         event=fixture.event,
         market=fixture.lookup.lookup(context, fixture.event),
+        evidence=fixture.evidence_lookup.lookup(context, fixture.event),
     )
     stack.outputs = (stack.intent(decision_context),)
     plan = dispatcher.plan_dispatch(

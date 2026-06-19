@@ -29,6 +29,7 @@ from futures_bot.domain.replay import (
 from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_market_context_reference,
     build_replay_decision_output_proposal,
     build_replay_decision_stack_fingerprint,
@@ -99,7 +100,11 @@ def _envelope(
         event_kind=fixture.event.kind,
         stack_descriptor=fixture.stack_descriptor,
         market_lookup_descriptor=fixture.lookup.descriptor,
+        evidence_lookup_descriptor=fixture.evidence_lookup.descriptor,
         market_context_reference=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ),
+        evidence_context_reference=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ),
         decision_index=0,
@@ -203,7 +208,7 @@ def _constructed_record_for_payload(
 
 
 @pytest.mark.parametrize("no_trade", [False, True])
-def test_v2_decision_output_round_trips(no_trade: bool) -> None:
+def test_v3_decision_output_round_trips(no_trade: bool) -> None:
     fixture = replay_decision_market_fixture()
     envelope = _envelope(fixture, no_trade=no_trade)
     proposal = build_replay_decision_output_proposal(envelope)
@@ -211,7 +216,7 @@ def test_v2_decision_output_round_trips(no_trade: bool) -> None:
 
     assert proposal.output_kind == envelope.decision_kind.value
     assert decoded == envelope
-    assert decoded.schema_version == 2
+    assert decoded.schema_version == 3
     assert "frame" not in decoded.market_context_reference.model_dump(mode="json")
 
 

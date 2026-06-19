@@ -36,11 +36,13 @@ from futures_bot.domain.replay import (
 from futures_bot.domain.replay_decisions import (
     ReplayDecisionStackContext,
     ReplayDecisionStackDescriptor,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_handler_fingerprint,
     build_replay_decision_intent_id,
     build_replay_decision_market_context_reference,
     build_replay_decision_stack_context,
 )
+from futures_bot.domain.replay_evidence import ReplayMarketEvidenceTimeline
 from futures_bot.domain.replay_market_data import (
     ReplayMarketAdapterDescriptor,
     ReplayMarketDataBinding,
@@ -49,6 +51,10 @@ from futures_bot.domain.replay_market_data import (
     ReplayMarketTimestampPolicy,
 )
 from futures_bot.domain.research import TemporalWindow, TemporalWindowKind
+from futures_bot.evidence.replay_lookup import LocalReplayMarketEvidenceLookup
+from futures_bot.evidence.replay_projection import (
+    DeterministicReplayMarketEvidenceTimelineBuilder,
+)
 from futures_bot.market_data.replay_adapter import build_replay_market_frame_timeline
 from futures_bot.market_data.replay_lookup import LocalReplayMarketFrameLookup
 
@@ -63,6 +69,8 @@ class ReplayDecisionMarketFixture:
     replay_timeline: ReplayTimeline
     market_timeline: ReplayMarketFrameTimeline
     lookup: LocalReplayMarketFrameLookup
+    evidence_timeline: ReplayMarketEvidenceTimeline
+    evidence_lookup: LocalReplayMarketEvidenceLookup
     stack_descriptor: ReplayDecisionStackDescriptor
     dispatch_context: ReplayDispatchContext
     decision_context: ReplayDecisionStackContext
@@ -208,10 +216,15 @@ def replay_decision_market_fixture(  # noqa: PLR0913 - explicit scenario fixture
         ),
     )
     lookup = LocalReplayMarketFrameLookup(market_timeline)
+    evidence_timeline = DeterministicReplayMarketEvidenceTimelineBuilder().build(
+        market_timeline
+    )
+    evidence_lookup = LocalReplayMarketEvidenceLookup(evidence_timeline)
     stack = descriptor or stack_descriptor(supported_event_kinds=(event_kind,))
     handler_fingerprint = build_replay_decision_handler_fingerprint(
         stack_descriptor=stack,
         market_lookup_descriptor=lookup.descriptor,
+        evidence_lookup_descriptor=evidence_lookup.descriptor,
     )
     dispatch_context = ReplayDispatchContext(
         run_id=run_id,
@@ -226,10 +239,12 @@ def replay_decision_market_fixture(  # noqa: PLR0913 - explicit scenario fixture
         event_kind=event.kind,
     )
     market = lookup.lookup(dispatch_context, event)
+    evidence = evidence_lookup.lookup(dispatch_context, event)
     decision_context = build_replay_decision_stack_context(
         dispatch_context=dispatch_context,
         event=event,
         market=market,
+        evidence=evidence,
     )
     return ReplayDecisionMarketFixture(
         record=record,
@@ -238,6 +253,8 @@ def replay_decision_market_fixture(  # noqa: PLR0913 - explicit scenario fixture
         replay_timeline=replay_timeline,
         market_timeline=market_timeline,
         lookup=lookup,
+        evidence_timeline=evidence_timeline,
+        evidence_lookup=evidence_lookup,
         stack_descriptor=stack,
         dispatch_context=dispatch_context,
         decision_context=decision_context,
@@ -256,6 +273,9 @@ def decision_id(
         event_id=context.event_id,
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ).reference_id,
+        evidence_context_reference_id=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ).reference_id,
         decision_index=decision_index,

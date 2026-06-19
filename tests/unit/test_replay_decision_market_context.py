@@ -30,6 +30,7 @@ def test_context_id_changes_with_dispatch_observation_frame_and_market_timeline(
         dispatch_context=base.dispatch_context.model_copy(update={"run_id": "run-2"}),
         event=base.event,
         market=base.decision_context.market,
+        evidence=base.decision_context.evidence,
     )
     changed_market = replay_decision_market_fixture(price="101")
     changed_timeline = replay_decision_market_fixture(timeline_id="timeline-2")

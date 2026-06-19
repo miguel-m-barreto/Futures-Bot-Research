@@ -29,6 +29,7 @@ from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
     ReplayDecisionStackDescriptor,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_intent_id,
     build_replay_decision_market_context_reference,
     build_replay_decision_stack_fingerprint,
@@ -37,6 +38,12 @@ from futures_bot.domain.replay_decisions import (
 
 def _reference_id(fixture) -> ReplayDecisionMarketContextReferenceId:
     return build_replay_decision_market_context_reference(
+        fixture.decision_context
+    ).reference_id
+
+
+def _evidence_reference_id(fixture) -> str:
+    return build_replay_decision_evidence_context_reference(
         fixture.decision_context
     ).reference_id
 
@@ -100,7 +107,11 @@ def _envelope(
         event_kind=fixture.event.kind,
         stack_descriptor=fixture.stack_descriptor,
         market_lookup_descriptor=fixture.lookup.descriptor,
+        evidence_lookup_descriptor=fixture.evidence_lookup.descriptor,
         market_context_reference=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ),
+        evidence_context_reference=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ),
         decision_index=0,
@@ -168,6 +179,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="event|b",
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=0,
     )
 
@@ -177,6 +189,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="event|b",
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=0,
     )
     assert base != build_replay_decision_intent_id(
@@ -185,6 +198,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="event|b",
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=1,
     )
     assert base != build_replay_decision_intent_id(
@@ -193,6 +207,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="event|b",
         decision_handler_fingerprint="replay-decision-handler:" + "0" * 64,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=0,
     )
     assert base != build_replay_decision_intent_id(
@@ -203,6 +218,18 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         market_context_reference_id=ReplayDecisionMarketContextReferenceId(
             "replay-decision-market-context-reference:" + "1" * 64
         ),
+        evidence_context_reference_id=_evidence_reference_id(fixture),
+        decision_index=0,
+    )
+    assert base != build_replay_decision_intent_id(
+        run_id="run|a",
+        event_order_index=0,
+        event_id="event|b",
+        decision_handler_fingerprint=fixture.handler_fingerprint,
+        market_context_reference_id=reference_id,
+        evidence_context_reference_id=(
+            "replay-decision-evidence-context-reference:" + "1" * 64
+        ),
         decision_index=0,
     )
     assert build_replay_decision_intent_id(
@@ -211,6 +238,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="c",
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=0,
     ) != build_replay_decision_intent_id(
         run_id="a",
@@ -218,6 +246,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         event_id="b|c",
         decision_handler_fingerprint=fixture.handler_fingerprint,
         market_context_reference_id=reference_id,
+        evidence_context_reference_id=_evidence_reference_id(fixture),
         decision_index=0,
     )
 
@@ -231,6 +260,7 @@ def test_decision_id_hardening_and_delimiter_safety() -> None:
         {"decision_index": -1},
         {"decision_handler_fingerprint": "bad"},
         {"market_context_reference_id": ReplayDecisionMarketContextReferenceId("bad")},
+        {"evidence_context_reference_id": "bad"},
     ),
 )
 def test_decision_id_rejects_invalid_material(kwargs: dict[str, object]) -> None:
@@ -241,6 +271,7 @@ def test_decision_id_rejects_invalid_material(kwargs: dict[str, object]) -> None
         "event_id": fixture.dispatch_context.event_id,
         "decision_handler_fingerprint": fixture.handler_fingerprint,
         "market_context_reference_id": _reference_id(fixture),
+        "evidence_context_reference_id": _evidence_reference_id(fixture),
         "decision_index": 0,
     }
     values.update(kwargs)
@@ -250,7 +281,7 @@ def test_decision_id_rejects_invalid_material(kwargs: dict[str, object]) -> None
 
 
 @pytest.mark.parametrize("no_trade", [False, True])
-def test_valid_v2_envelopes(no_trade: bool) -> None:
+def test_valid_v3_envelopes(no_trade: bool) -> None:
     fixture = replay_decision_market_fixture()
     envelope = _envelope(
         fixture,
@@ -282,7 +313,7 @@ def test_valid_v2_envelopes(no_trade: bool) -> None:
         ({"schema_version": 1}, "schema_version"),
     ),
 )
-def test_v2_envelope_rejects_payload_and_metadata_mismatches(
+def test_v3_envelope_rejects_payload_and_metadata_mismatches(
     updates: dict[str, object],
     match: str,
 ) -> None:
@@ -310,7 +341,7 @@ def test_v2_envelope_rejects_payload_and_metadata_mismatches(
         ({"status": DecisionIntentStatus.CANCELLED}, "PROPOSED"),
     ),
 )
-def test_v2_envelope_rejects_invalid_decision_binding(
+def test_v3_envelope_rejects_invalid_decision_binding(
     intent: dict[str, object],
     match: str,
 ) -> None:

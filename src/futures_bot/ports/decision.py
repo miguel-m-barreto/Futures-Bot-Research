@@ -46,5 +46,5 @@ class DecisionStackPort(Protocol):
         self,
         context: ReplayDecisionStackContext,
     ) -> tuple[DecisionStackOutput, ...]:
-        """Return one or more explicit deterministic decision outcomes."""
+        """Return deterministic decisions from market and factual evidence context."""
         ...

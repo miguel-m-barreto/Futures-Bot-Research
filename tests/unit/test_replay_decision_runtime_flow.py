@@ -43,6 +43,7 @@ from futures_bot.domain.replay import (
 from futures_bot.domain.replay_decisions import (
     ReplayDecisionStackContext,
     ReplayDecisionStackDescriptor,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_handler_fingerprint,
     build_replay_decision_intent_id,
     build_replay_decision_market_context_reference,
@@ -54,6 +55,10 @@ from futures_bot.domain.replay_market_data import (
     ReplayMarketTimestampPolicy,
 )
 from futures_bot.domain.research import TemporalWindow, TemporalWindowKind
+from futures_bot.evidence.replay_lookup import LocalReplayMarketEvidenceLookup
+from futures_bot.evidence.replay_projection import (
+    DeterministicReplayMarketEvidenceTimelineBuilder,
+)
 from futures_bot.infrastructure.replay.in_memory import (
     InMemoryReplayArtifactFingerprintStore,
     InMemoryReplayArtifactFingerprintVerificationBatchReportStore,
@@ -151,8 +156,12 @@ class _DecisionFlowStack:
             decision_handler_fingerprint=build_replay_decision_handler_fingerprint(
                 stack_descriptor=self.descriptor(),
                 market_lookup_descriptor=context.market.descriptor,
+                evidence_lookup_descriptor=context.evidence.descriptor,
             ),
             market_context_reference_id=build_replay_decision_market_context_reference(
+                context
+            ).reference_id,
+            evidence_context_reference_id=build_replay_decision_evidence_context_reference(
                 context
             ).reference_id,
             decision_index=decision_index,
@@ -316,8 +325,12 @@ def test_replay_decision_stack_runtime_flow_round_trips_typed_journal() -> None:
         ),
     )
     market_lookup = LocalReplayMarketFrameLookup(market_timeline)
+    evidence_timeline = DeterministicReplayMarketEvidenceTimelineBuilder().build(
+        market_timeline
+    )
+    evidence_lookup = LocalReplayMarketEvidenceLookup(evidence_timeline)
     stack = _DecisionFlowStack()
-    handler = ReplayDecisionStackHandler(stack, market_lookup)
+    handler = ReplayDecisionStackHandler(stack, market_lookup, evidence_lookup)
     dispatcher = LocalDeterministicReplayDispatcher((handler,))
     runtime = LocalDeterministicReplayRuntime(
         manifest_store=manifest_store,

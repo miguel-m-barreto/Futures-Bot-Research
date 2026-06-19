@@ -18,6 +18,7 @@ from futures_bot.domain.replay import (
 from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_market_context_reference,
     build_replay_decision_output_proposal,
 )
@@ -49,7 +50,11 @@ def _envelope(decision_index: int = 0) -> ReplayDecisionOutputEnvelope:
         event_kind=fixture.event.kind,
         stack_descriptor=fixture.stack_descriptor,
         market_lookup_descriptor=fixture.lookup.descriptor,
+        evidence_lookup_descriptor=fixture.evidence_lookup.descriptor,
         market_context_reference=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ),
+        evidence_context_reference=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ),
         decision_index=decision_index,

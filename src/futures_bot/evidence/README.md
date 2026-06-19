@@ -17,8 +17,7 @@ confidence. Those require explicit deterministic derivation policies.
 
 `TechnicalEvidence` and the existing `EvidenceSet` remain separate analytical
 contracts. Factual market evidence is not a target, decision, risk verdict,
-order, recommended side, or execution instruction. DecisionStack integration is
-deferred.
+order, recommended side, or execution instruction.
 
 ## Replay Projection Timeline
 
@@ -30,9 +29,9 @@ The `ReplayMarketFrameLookupAuthority` is the membership authority. Every
 evidence projection embeds the lookup descriptor, the exact lookup entry, the
 exact market frame projection, and the derived evidence set.
 
-The evidence timeline embeds projections, not decision outputs. DecisionStack
-integration is deferred; a future evidence lookup can reference this timeline by
-replay event and pass compact evidence-set references into decision context.
+The evidence timeline embeds projections, not decision outputs. Decision output
+envelopes use compact references to this evidence rather than duplicating full
+evidence sets.
 
 ## Replay Evidence Lookup
 
@@ -48,5 +47,9 @@ without embedding every entry.
 
 `LocalReplayMarketEvidenceLookup` accepts a `ReplayDispatchContext` and matching
 `ReplayTimelineEvent`, then returns a `ReplayMarketEvidenceLookupResult` proving
-the compact entry and complete projection agree. No evidence is passed to
-DecisionStack yet; a future sprint will add a compact evidence context reference.
+the compact entry and complete projection agree.
+
+`ReplayDecisionStackContext` now includes that deterministic lookup result. The
+decision output envelope keeps only compact market and evidence context
+references, and decision IDs commit to both. The first real bot and DB
+persistence remain deferred.

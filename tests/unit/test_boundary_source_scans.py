@@ -104,17 +104,26 @@ def test_research_ports_do_not_import_infrastructure() -> None:
 
 
 def test_in_memory_research_store_does_not_import_forbidden_dependencies() -> None:
-    source = (
-        ROOT / "src/futures_bot/infrastructure/research/in_memory.py"
-    ).read_text(encoding="utf-8")
+    lines = _import_lines(ROOT / "src/futures_bot/infrastructure/research/in_memory.py")
     forbidden = (
         "sqlalchemy",
+        "SQLAlchemy",
         "psycopg",
         "asyncpg",
+        "Postgres",
+        "Redis",
         "duckdb",
         "sqlite",
+        "database",
         "confluent_kafka",
         "aiokafka",
+        "Kafka",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
         "pandas",
         "numpy",
         "sklearn",
@@ -126,7 +135,7 @@ def test_in_memory_research_store_does_not_import_forbidden_dependencies() -> No
         "seaborn",
     )
     for name in forbidden:
-        assert name not in source
+        assert not any(name in line for line in lines)
 
 
 def test_local_research_recorder_does_not_import_forbidden_dependencies() -> None:

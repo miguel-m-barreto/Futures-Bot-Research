@@ -17,11 +17,19 @@ from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputKind,
     ReplayDecisionStackContext,
     ReplayDecisionStackDescriptor,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_handler_fingerprint,
     build_replay_decision_market_context_reference,
     build_replay_decision_output_proposal,
     build_replay_decision_stack_context,
     build_replay_decision_stack_fingerprint,
+)
+from futures_bot.domain.replay_evidence import (
+    ReplayMarketEvidenceLookupAuthority,
+    ReplayMarketEvidenceLookupDescriptor,
+    ReplayMarketEvidenceLookupResult,
+    build_replay_market_evidence_lookup_descriptor,
+    validate_replay_market_evidence_lookup_membership,
 )
 from futures_bot.domain.replay_market_data import (
     ReplayMarketFrameLookupAuthority,
@@ -31,6 +39,7 @@ from futures_bot.domain.replay_market_data import (
     validate_replay_market_frame_lookup_membership,
 )
 from futures_bot.ports.decision import DecisionStackOutput, DecisionStackPort
+from futures_bot.ports.evidence import ReplayMarketEvidenceLookupPort
 from futures_bot.ports.market_data import ReplayMarketFrameLookupPort
 
 
@@ -41,9 +50,11 @@ class ReplayDecisionStackHandler:
         self,
         decision_stack: DecisionStackPort,
         market_lookup: ReplayMarketFrameLookupPort,
+        evidence_lookup: ReplayMarketEvidenceLookupPort,
     ) -> None:
         self._decision_stack = decision_stack
         self._market_lookup = market_lookup
+        self._evidence_lookup = evidence_lookup
         descriptor = _descriptor_from_stack(decision_stack)
         self._descriptor = _snapshot_boundary_model(
             ReplayDecisionStackDescriptor,
@@ -67,19 +78,40 @@ class ReplayDecisionStackHandler:
         )
         if self._market_lookup_descriptor != expected_descriptor:
             raise ValueError("market lookup descriptor must match lookup authority")
+        evidence_authority = evidence_lookup.authority
+        self._evidence_lookup_authority = _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupAuthority,
+            evidence_authority,
+            field_name="evidence lookup authority",
+        )
+        evidence_descriptor = evidence_lookup.descriptor
+        expected_evidence_descriptor = build_replay_market_evidence_lookup_descriptor(
+            self._evidence_lookup_authority
+        )
+        self._evidence_lookup_descriptor = _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupDescriptor,
+            evidence_descriptor,
+            field_name="evidence lookup descriptor",
+        )
+        if self._evidence_lookup_descriptor != expected_evidence_descriptor:
+            raise ValueError("evidence lookup descriptor must match lookup authority")
         unsupported = tuple(
             kind
             for kind in self._descriptor.supported_event_kinds
             if kind not in self._market_lookup_descriptor.supported_event_kinds
+            or kind not in self._evidence_lookup_descriptor.supported_event_kinds
         )
         if unsupported:
-            raise ValueError("DecisionStack event kinds must be supported by market lookup")
+            raise ValueError(
+                "DecisionStack event kinds must be supported by market and evidence lookup"
+            )
         self._decision_stack_fingerprint = build_replay_decision_stack_fingerprint(
             self._descriptor
         )
         self._decision_handler_fingerprint = build_replay_decision_handler_fingerprint(
             stack_descriptor=self._descriptor,
             market_lookup_descriptor=self._market_lookup_descriptor,
+            evidence_lookup_descriptor=self._evidence_lookup_descriptor,
         )
 
     @property
@@ -119,6 +151,22 @@ class ReplayDecisionStackHandler:
         )
 
     @property
+    def evidence_lookup_descriptor(self) -> ReplayMarketEvidenceLookupDescriptor:
+        return _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupDescriptor,
+            self._evidence_lookup_descriptor,
+            field_name="evidence lookup descriptor",
+        )
+
+    @property
+    def evidence_lookup_authority(self) -> ReplayMarketEvidenceLookupAuthority:
+        return _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupAuthority,
+            self._evidence_lookup_authority,
+            field_name="evidence lookup authority",
+        )
+
+    @property
     def decision_stack_fingerprint(self) -> str:
         return self._decision_stack_fingerprint
 
@@ -126,7 +174,7 @@ class ReplayDecisionStackHandler:
     def decision_handler_fingerprint(self) -> str:
         return self._decision_handler_fingerprint
 
-    def handle(
+    def handle(  # noqa: PLR0915 - explicit replay boundary checks
         self,
         context: ReplayDispatchContext,
         event: ReplayTimelineEvent,
@@ -142,6 +190,14 @@ class ReplayDecisionStackHandler:
         _require_lookup_authority_unchanged(
             self._market_lookup,
             self._market_lookup_authority,
+        )
+        _require_evidence_lookup_descriptor_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
         )
         if trusted_event.kind not in self._descriptor.supported_event_kinds:
             raise ValueError("DecisionStack does not support replay event kind")
@@ -169,6 +225,14 @@ class ReplayDecisionStackHandler:
             authority=self._market_lookup_authority,
             result=trusted_market,
         )
+        _require_evidence_lookup_descriptor_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
+        )
         _require_lookup_descriptor_unchanged(
             self._market_lookup,
             self._market_lookup_descriptor,
@@ -177,12 +241,67 @@ class ReplayDecisionStackHandler:
             self._market_lookup,
             self._market_lookup_authority,
         )
+        evidence_lookup_context = _snapshot_boundary_model(
+            ReplayDispatchContext,
+            trusted_context,
+            field_name="evidence lookup dispatch context",
+        )
+        evidence_lookup_event = _snapshot_boundary_model(
+            ReplayTimelineEvent,
+            trusted_event,
+            field_name="evidence lookup timeline event",
+        )
+        raw_evidence = self._evidence_lookup.lookup(
+            evidence_lookup_context,
+            evidence_lookup_event,
+        )
+        trusted_evidence = _snapshot_evidence_lookup_result(raw_evidence)
+        _validate_evidence_result_matches_trusted_event(
+            trusted_context=trusted_context,
+            trusted_event=trusted_event,
+            evidence=trusted_evidence,
+        )
+        if trusted_evidence.descriptor != self._evidence_lookup_descriptor:
+            raise ValueError("evidence lookup result descriptor changed")
+        validate_replay_market_evidence_lookup_membership(
+            authority=self._evidence_lookup_authority,
+            result=trusted_evidence,
+        )
+        _require_market_and_evidence_context_match(
+            market=trusted_market,
+            evidence=trusted_evidence,
+        )
+        _require_lookup_descriptor_unchanged(
+            self._market_lookup,
+            self._market_lookup_descriptor,
+        )
+        _require_lookup_authority_unchanged(
+            self._market_lookup,
+            self._market_lookup_authority,
+        )
+        _require_evidence_lookup_descriptor_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
+        )
         trusted_decision_context = build_replay_decision_stack_context(
             dispatch_context=trusted_context,
             event=trusted_event,
             market=trusted_market,
+            evidence=trusted_evidence,
         )
         _require_stack_metadata_unchanged(self._decision_stack, self._descriptor)
+        _require_evidence_lookup_descriptor_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
+        )
         stack_context = _snapshot_boundary_model(
             ReplayDecisionStackContext,
             trusted_decision_context,
@@ -215,6 +334,14 @@ class ReplayDecisionStackHandler:
             self._market_lookup,
             self._market_lookup_authority,
         )
+        _require_evidence_lookup_descriptor_unchanged_after_decide(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged_after_decide(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
+        )
         if not isinstance(outputs, tuple):
             raise ValueError("DecisionStack decide() must return a tuple")
         if not outputs:
@@ -227,6 +354,7 @@ class ReplayDecisionStackHandler:
                 envelope = _envelope_for_output(
                     descriptor=self._descriptor,
                     market_lookup_descriptor=self._market_lookup_descriptor,
+                    evidence_lookup_descriptor=self._evidence_lookup_descriptor,
                     context=trusted_decision_context,
                     decision_index=decision_index,
                     decision=decision,
@@ -249,6 +377,14 @@ class ReplayDecisionStackHandler:
         _require_lookup_authority_unchanged_after_decide(
             self._market_lookup,
             self._market_lookup_authority,
+        )
+        _require_evidence_lookup_descriptor_unchanged_after_decide(
+            self._evidence_lookup,
+            self._evidence_lookup_descriptor,
+        )
+        _require_evidence_lookup_authority_unchanged_after_decide(
+            self._evidence_lookup,
+            self._evidence_lookup_authority,
         )
         return tuple(proposals)
 
@@ -343,6 +479,66 @@ def _require_lookup_authority_unchanged_after_decide(
         raise ValueError("market lookup authority changed during invocation")
 
 
+def _require_evidence_lookup_descriptor_unchanged(
+    evidence_lookup: ReplayMarketEvidenceLookupPort,
+    descriptor: ReplayMarketEvidenceLookupDescriptor,
+) -> None:
+    current = _snapshot_boundary_model(
+        ReplayMarketEvidenceLookupDescriptor,
+        evidence_lookup.descriptor,
+        field_name="evidence lookup descriptor",
+    )
+    if current != descriptor:
+        raise ValueError("evidence lookup descriptor changed after handler construction")
+
+
+def _require_evidence_lookup_authority_unchanged(
+    evidence_lookup: ReplayMarketEvidenceLookupPort,
+    authority: ReplayMarketEvidenceLookupAuthority,
+) -> None:
+    try:
+        current = _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupAuthority,
+            evidence_lookup.authority,
+            field_name="evidence lookup authority",
+        )
+    except Exception as exc:
+        raise ValueError(
+            "evidence lookup authority changed after handler construction"
+        ) from exc
+    if current != authority:
+        raise ValueError("evidence lookup authority changed after handler construction")
+
+
+def _require_evidence_lookup_descriptor_unchanged_after_decide(
+    evidence_lookup: ReplayMarketEvidenceLookupPort,
+    descriptor: ReplayMarketEvidenceLookupDescriptor,
+) -> None:
+    current = _snapshot_boundary_model(
+        ReplayMarketEvidenceLookupDescriptor,
+        evidence_lookup.descriptor,
+        field_name="evidence lookup descriptor",
+    )
+    if current != descriptor:
+        raise ValueError("evidence lookup descriptor changed during invocation")
+
+
+def _require_evidence_lookup_authority_unchanged_after_decide(
+    evidence_lookup: ReplayMarketEvidenceLookupPort,
+    authority: ReplayMarketEvidenceLookupAuthority,
+) -> None:
+    try:
+        current = _snapshot_boundary_model(
+            ReplayMarketEvidenceLookupAuthority,
+            evidence_lookup.authority,
+            field_name="evidence lookup authority",
+        )
+    except Exception as exc:
+        raise ValueError("evidence lookup authority changed during invocation") from exc
+    if current != authority:
+        raise ValueError("evidence lookup authority changed during invocation")
+
+
 def _revalidate_context(context: object) -> ReplayDispatchContext:
     return _snapshot_boundary_model(
         ReplayDispatchContext,
@@ -364,6 +560,16 @@ def _snapshot_market_lookup_result(value: object) -> ReplayMarketFrameLookupResu
         ReplayMarketFrameLookupResult,
         value,
         field_name="market lookup result",
+    )
+
+
+def _snapshot_evidence_lookup_result(
+    value: object,
+) -> ReplayMarketEvidenceLookupResult:
+    return _snapshot_boundary_model(
+        ReplayMarketEvidenceLookupResult,
+        value,
+        field_name="evidence lookup result",
     )
 
 
@@ -462,6 +668,93 @@ def _validate_market_result_matches_trusted_event(
             raise ValueError(f"market lookup result {field_name} changed")
 
 
+def _validate_evidence_result_matches_trusted_event(
+    *,
+    trusted_context: ReplayDispatchContext,
+    trusted_event: ReplayTimelineEvent,
+    evidence: ReplayMarketEvidenceLookupResult,
+) -> None:
+    _validate_context_matches_event(trusted_context, trusted_event)
+    if trusted_context.timeline_id != evidence.descriptor.replay_timeline_id:
+        raise ValueError("evidence lookup result timeline_id changed")
+    if trusted_context.replay_plan_id != evidence.descriptor.replay_plan_id:
+        raise ValueError("evidence lookup result replay_plan_id changed")
+    event_values = (
+        ("event_id", evidence.entry.event_id, trusted_context.event_id),
+        (
+            "event_order_index",
+            evidence.entry.event_order_index,
+            trusted_context.event_order_index,
+        ),
+        ("event_time", evidence.entry.event_time, trusted_context.event_time),
+        ("event_kind", evidence.entry.event_kind, trusted_context.event_kind),
+        (
+            "event_id",
+            evidence.projection.market_lookup_entry.event_id,
+            trusted_event.event_id,
+        ),
+        (
+            "event_order_index",
+            evidence.projection.market_lookup_entry.event_order_index,
+            trusted_event.order_index,
+        ),
+        (
+            "event_time",
+            evidence.projection.market_lookup_entry.event_time,
+            trusted_event.event_time,
+        ),
+        (
+            "event_kind",
+            evidence.projection.market_lookup_entry.event_kind,
+            trusted_event.kind,
+        ),
+        (
+            "event_id",
+            evidence.projection.market_frame_projection.event_id,
+            trusted_event.event_id,
+        ),
+        (
+            "event_order_index",
+            evidence.projection.market_frame_projection.event_order_index,
+            trusted_event.order_index,
+        ),
+        (
+            "event_time",
+            evidence.projection.market_frame_projection.event_time,
+            trusted_event.event_time,
+        ),
+    )
+    for field_name, actual, expected in event_values:
+        if actual != expected:
+            raise ValueError(f"evidence lookup result {field_name} changed")
+
+
+def _require_market_and_evidence_context_match(
+    *,
+    market: ReplayMarketFrameLookupResult,
+    evidence: ReplayMarketEvidenceLookupResult,
+) -> None:
+    if market.entry != evidence.projection.market_lookup_entry:
+        raise ValueError("market lookup entry does not match evidence projection")
+    if market.frame_projection != evidence.projection.market_frame_projection:
+        raise ValueError("market frame projection does not match evidence projection")
+    if market.frame_projection.frame != evidence.projection.evidence_set.source_frame:
+        raise ValueError("market frame does not match evidence set source frame")
+    values = (
+        ("event_id", market.entry.event_id, evidence.entry.event_id),
+        (
+            "event_order_index",
+            market.entry.event_order_index,
+            evidence.entry.event_order_index,
+        ),
+        ("event_time", market.entry.event_time, evidence.entry.event_time),
+        ("event_kind", market.entry.event_kind, evidence.entry.event_kind),
+    )
+    for field_name, actual, expected in values:
+        if actual != expected:
+            raise ValueError(f"market and evidence {field_name} mismatch")
+
+
 def _revalidate_decision_output(output: object) -> DecisionStackOutput:
     if isinstance(output, DecisionIntent):
         return _snapshot_boundary_model(
@@ -478,16 +771,18 @@ def _revalidate_decision_output(output: object) -> DecisionStackOutput:
     raise ValueError("DecisionStack output must be DecisionIntent or NoTradeDecision")
 
 
-def _envelope_for_output(
+def _envelope_for_output(  # noqa: PLR0913 - explicit envelope material
     *,
     descriptor: ReplayDecisionStackDescriptor,
     market_lookup_descriptor: ReplayMarketFrameLookupDescriptor,
+    evidence_lookup_descriptor: ReplayMarketEvidenceLookupDescriptor,
     context: ReplayDecisionStackContext,
     decision_index: int,
     decision: DecisionStackOutput,
 ) -> ReplayDecisionOutputEnvelope:
     dispatch_context = context.dispatch_context
     market_reference = build_replay_decision_market_context_reference(context)
+    evidence_reference = build_replay_decision_evidence_context_reference(context)
     if isinstance(decision, DecisionIntent):
         return ReplayDecisionOutputEnvelope(
             run_id=dispatch_context.run_id,
@@ -502,7 +797,9 @@ def _envelope_for_output(
             event_kind=dispatch_context.event_kind,
             stack_descriptor=descriptor,
             market_lookup_descriptor=market_lookup_descriptor,
+            evidence_lookup_descriptor=evidence_lookup_descriptor,
             market_context_reference=market_reference,
+            evidence_context_reference=evidence_reference,
             decision_index=decision_index,
             decision_kind=ReplayDecisionOutputKind.DECISION_INTENT,
             decision_intent=decision,
@@ -520,7 +817,9 @@ def _envelope_for_output(
         event_kind=dispatch_context.event_kind,
         stack_descriptor=descriptor,
         market_lookup_descriptor=market_lookup_descriptor,
+        evidence_lookup_descriptor=evidence_lookup_descriptor,
         market_context_reference=market_reference,
+        evidence_context_reference=evidence_reference,
         decision_index=decision_index,
         decision_kind=ReplayDecisionOutputKind.NO_TRADE_DECISION,
         no_trade_decision=decision,

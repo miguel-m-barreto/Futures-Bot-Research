@@ -27,6 +27,7 @@ from futures_bot.domain.replay_decisions import (
     ReplayDecisionOutputEnvelope,
     ReplayDecisionOutputKind,
     ReplayDecisionStackContext,
+    build_replay_decision_evidence_context_reference,
     build_replay_decision_handler_fingerprint,
     build_replay_decision_intent_id,
     build_replay_decision_market_context_reference,
@@ -96,7 +97,11 @@ def _envelope(fixture, decision, *, decision_index: int = 0) -> ReplayDecisionOu
         event_kind=fixture.event.kind,
         stack_descriptor=fixture.stack_descriptor,
         market_lookup_descriptor=fixture.lookup.descriptor,
+        evidence_lookup_descriptor=fixture.evidence_lookup.descriptor,
         market_context_reference=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ),
+        evidence_context_reference=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ),
         decision_index=decision_index,
@@ -123,9 +128,11 @@ def test_descriptor_fingerprints_and_handler_fingerprint_change_with_market() ->
     assert build_replay_decision_handler_fingerprint(
         stack_descriptor=descriptor,
         market_lookup_descriptor=first.lookup.descriptor,
+        evidence_lookup_descriptor=first.evidence_lookup.descriptor,
     ) != build_replay_decision_handler_fingerprint(
         stack_descriptor=descriptor,
         market_lookup_descriptor=changed_market.lookup.descriptor,
+        evidence_lookup_descriptor=changed_market.evidence_lookup.descriptor,
     )
 
     with pytest.raises(ValidationError, match="sorted"):
@@ -138,12 +145,14 @@ def test_decision_context_id_and_reference_are_deterministic_and_compact() -> No
     fixture = replay_decision_market_fixture()
     context = fixture.decision_context
     reference = build_replay_decision_market_context_reference(context)
+    evidence_reference = build_replay_decision_evidence_context_reference(context)
 
     assert ReplayDecisionStackContext.model_validate(context.model_dump()) == context
     assert context.context_id == build_replay_decision_stack_context_id(
         dispatch_context=fixture.dispatch_context,
         event=fixture.event,
         market=context.market,
+        evidence=context.evidence,
     )
     assert reference.context_id == context.context_id
     dumped = reference.model_dump(mode="json")
@@ -153,6 +162,27 @@ def test_decision_context_id_and_reference_are_deterministic_and_compact() -> No
     assert reference.binding_authority_fingerprint == (
         context.market.observation_projection.binding_authority.binding_authority_fingerprint
     )
+    assert evidence_reference.reference_id.startswith(
+        "replay-decision-evidence-context-reference:"
+    )
+    assert evidence_reference.evidence_set_id == (
+        context.evidence.projection.evidence_set.evidence_set_id
+    )
+    evidence_dump = evidence_reference.model_dump(mode="json")
+    assert "evidence_set" not in evidence_dump
+    assert "projection" not in evidence_dump
+
+
+def test_evidence_context_reference_round_trip_and_stale_id_rejected() -> None:
+    fixture = replay_decision_market_fixture()
+    reference = build_replay_decision_evidence_context_reference(fixture.decision_context)
+
+    assert type(reference).model_validate(reference.model_dump(mode="json")) == reference
+    payload = reference.model_dump(mode="json")
+    payload["evidence_set_id"] = {"value": "market-evidence-set:" + "0" * 64}
+
+    with pytest.raises(ValidationError, match="reference_id"):
+        type(reference).model_validate(payload)
 
 
 @pytest.mark.parametrize(
@@ -193,6 +223,25 @@ def test_decision_context_rejects_dispatch_event_and_market_mismatches() -> None
                 }
             ).model_dump()
         )
+
+
+def test_decision_context_rejects_evidence_from_another_event_or_frame() -> None:
+    fixture = replay_decision_market_fixture()
+    other_event = replay_decision_market_fixture(event_id="event-2")
+    other_frame = replay_decision_market_fixture(price="101")
+
+    with pytest.raises(ValidationError, match=r"evidence lookup entry|market lookup entry"):
+        ReplayDecisionStackContext.model_validate(
+            fixture.decision_context.model_copy(
+                update={"evidence": other_event.decision_context.evidence}
+            ).model_dump()
+        )
+    with pytest.raises(ValidationError, match=r"market lookup entry|source frame"):
+        ReplayDecisionStackContext.model_validate(
+            fixture.decision_context.model_copy(
+                update={"evidence": other_frame.decision_context.evidence}
+            ).model_dump()
+        )
     with pytest.raises(ValidationError, match="timeline_id"):
         ReplayDecisionStackContext.model_validate(
             fixture.decision_context.model_copy(
@@ -216,8 +265,24 @@ def test_decision_id_commits_to_handler_and_market_context() -> None:
         run_id=fixture.dispatch_context.run_id,
         event_order_index=fixture.dispatch_context.event_order_index,
         event_id=fixture.dispatch_context.event_id,
+        decision_handler_fingerprint=fixture.handler_fingerprint,
+        market_context_reference_id=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ).reference_id,
+        evidence_context_reference_id=(
+            "replay-decision-evidence-context-reference:" + "1" * 64
+        ),
+        decision_index=0,
+    )
+    assert first != build_replay_decision_intent_id(
+        run_id=fixture.dispatch_context.run_id,
+        event_order_index=fixture.dispatch_context.event_order_index,
+        event_id=fixture.dispatch_context.event_id,
         decision_handler_fingerprint="replay-decision-handler:" + "0" * 64,
         market_context_reference_id=build_replay_decision_market_context_reference(
+            fixture.decision_context
+        ).reference_id,
+        evidence_context_reference_id=build_replay_decision_evidence_context_reference(
             fixture.decision_context
         ).reference_id,
         decision_index=0,
@@ -232,11 +297,14 @@ def test_decision_id_commits_to_handler_and_market_context() -> None:
             market_context_reference_id=build_replay_decision_market_context_reference(
                 fixture.decision_context
             ).reference_id,
+            evidence_context_reference_id=build_replay_decision_evidence_context_reference(
+                fixture.decision_context
+            ).reference_id,
             decision_index=0,
         )
 
 
-def test_v2_decision_intent_and_no_trade_envelopes_round_trip() -> None:
+def test_v3_decision_intent_and_no_trade_envelopes_round_trip() -> None:
     fixture = replay_decision_market_fixture()
     intent = _intent(fixture)
     no_trade = _no_trade(fixture)
@@ -244,7 +312,7 @@ def test_v2_decision_intent_and_no_trade_envelopes_round_trip() -> None:
     intent_envelope = _envelope(fixture, intent)
     no_trade_envelope = _envelope(fixture, no_trade)
 
-    assert intent_envelope.schema_version == 2
+    assert intent_envelope.schema_version == 3
     assert intent_envelope.decision_kind is ReplayDecisionOutputKind.DECISION_INTENT
     assert intent_envelope.decision_intent == intent
     assert no_trade_envelope.no_trade_decision == no_trade
@@ -258,12 +326,29 @@ def test_recomputed_market_reference_with_old_decision_id_is_rejected() -> None:
     changed = replay_decision_market_fixture(price="101")
     payload = _envelope(fixture, _intent(fixture)).model_dump()
     payload["market_lookup_descriptor"] = changed.lookup.descriptor.model_dump()
+    payload["evidence_lookup_descriptor"] = changed.evidence_lookup.descriptor.model_dump()
     payload["market_context_reference"] = build_replay_decision_market_context_reference(
+        changed.decision_context
+    ).model_dump()
+    payload["evidence_context_reference"] = build_replay_decision_evidence_context_reference(
         changed.decision_context
     ).model_dump()
 
     with pytest.raises(ValidationError, match="decision_intent_id"):
         ReplayDecisionOutputEnvelope.model_validate(payload)
+
+
+def test_output_envelope_includes_evidence_reference_and_payload_changes() -> None:
+    fixture = replay_decision_market_fixture()
+    changed = replay_decision_market_fixture(price="101")
+    base = _envelope(fixture, _intent(fixture))
+    changed_envelope = _envelope(changed, _intent(changed))
+
+    assert base.evidence_context_reference.evidence_set_id == (
+        fixture.decision_context.evidence.projection.evidence_set.evidence_set_id
+    )
+    assert "evidence_context_reference" in base.model_dump(mode="json")
+    assert base.model_dump(mode="json") != changed_envelope.model_dump(mode="json")
 
 
 def test_envelope_rejects_valid_market_reference_from_another_event() -> None:

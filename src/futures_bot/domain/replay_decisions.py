@@ -18,10 +18,14 @@ from futures_bot.domain.decisions import (
 from futures_bot.domain.ids import (
     BotId,
     DecisionIntentId,
+    MarketEvidenceSetId,
     MarketFrameId,
     MarketObservationId,
     ReplayDecisionContextId,
     ReplayDecisionMarketContextReferenceId,
+    ReplayMarketEvidenceLookupEntryId,
+    ReplayMarketEvidenceProjectionId,
+    ReplayMarketEvidenceTimelineId,
     ReplayMarketFrameProjectionId,
     ReplayMarketFrameTimelineId,
     ReplayMarketObservationProjectionId,
@@ -38,6 +42,10 @@ from futures_bot.domain.replay import (
     _validate_required_text,
     _validate_strict_int,
 )
+from futures_bot.domain.replay_evidence import (
+    ReplayMarketEvidenceLookupDescriptor,
+    ReplayMarketEvidenceLookupResult,
+)
 from futures_bot.domain.replay_market_data import (
     ReplayMarketFrameLookupDescriptor,
     ReplayMarketFrameLookupResult,
@@ -51,6 +59,9 @@ _DECISION_HANDLER_FINGERPRINT_RE = re.compile(
 _REPLAY_DECISION_CONTEXT_ID_RE = re.compile(r"replay-decision-context:[0-9a-f]{64}")
 _REPLAY_DECISION_MARKET_CONTEXT_REFERENCE_ID_RE = re.compile(
     r"replay-decision-market-context-reference:[0-9a-f]{64}"
+)
+_REPLAY_DECISION_EVIDENCE_CONTEXT_REFERENCE_ID_RE = re.compile(
+    r"replay-decision-evidence-context-reference:[0-9a-f]{64}"
 )
 _REPLAY_MARKET_ADAPTER_FINGERPRINT_RE = re.compile(
     r"replay-market-adapter:[0-9a-f]{64}"
@@ -70,6 +81,22 @@ _REPLAY_MARKET_FRAME_PROJECTION_ID_RE = re.compile(
 )
 _MARKET_FRAME_ID_RE = re.compile(r"market-frame:[0-9a-f]{64}")
 _MARKET_OBSERVATION_ID_RE = re.compile(r"market-observation:[0-9a-f]{64}")
+_REPLAY_MARKET_EVIDENCE_TIMELINE_ID_RE = re.compile(
+    r"replay-market-evidence-timeline:[0-9a-f]{64}"
+)
+_REPLAY_MARKET_EVIDENCE_LOOKUP_AUTHORITY_FINGERPRINT_RE = re.compile(
+    r"replay-market-evidence-lookup-authority:[0-9a-f]{64}"
+)
+_MARKET_EVIDENCE_BUILDER_FINGERPRINT_RE = re.compile(
+    r"market-evidence-builder:[0-9a-f]{64}"
+)
+_REPLAY_MARKET_EVIDENCE_LOOKUP_ENTRY_ID_RE = re.compile(
+    r"replay-market-evidence-lookup-entry:[0-9a-f]{64}"
+)
+_REPLAY_MARKET_EVIDENCE_PROJECTION_ID_RE = re.compile(
+    r"replay-market-evidence-projection:[0-9a-f]{64}"
+)
+_MARKET_EVIDENCE_SET_ID_RE = re.compile(r"market-evidence-set:[0-9a-f]{64}")
 
 
 class ReplayDecisionStackDescriptor(BaseModel):
@@ -131,12 +158,19 @@ def build_replay_decision_handler_fingerprint(
     *,
     stack_descriptor: ReplayDecisionStackDescriptor,
     market_lookup_descriptor: ReplayMarketFrameLookupDescriptor,
+    evidence_lookup_descriptor: ReplayMarketEvidenceLookupDescriptor,
 ) -> str:
     stack_descriptor = _revalidate_stack_descriptor(stack_descriptor)
     market_lookup_descriptor = _revalidate_market_lookup_descriptor(
         market_lookup_descriptor
     )
+    evidence_lookup_descriptor = _revalidate_evidence_lookup_descriptor(
+        evidence_lookup_descriptor
+    )
     material = {
+        "evidence_lookup_descriptor": evidence_lookup_descriptor.model_dump(
+            mode="json"
+        ),
         "market_lookup_descriptor": market_lookup_descriptor.model_dump(mode="json"),
         "stack_descriptor": stack_descriptor.model_dump(mode="json"),
     }
@@ -150,11 +184,15 @@ def build_replay_decision_intent_id(  # noqa: PLR0913 - explicit deterministic I
     event_id: str,
     decision_handler_fingerprint: str,
     market_context_reference_id: ReplayDecisionMarketContextReferenceId,
+    evidence_context_reference_id: str,
     decision_index: int,
 ) -> DecisionIntentId:
     """Build the deterministic replay identity for a DecisionStack output."""
     market_context_reference_id = _validate_market_context_reference_id(
         market_context_reference_id
+    )
+    evidence_context_reference_id = _validate_evidence_context_reference_id(
+        evidence_context_reference_id
     )
     material = {
         "decision_index": _validate_strict_non_negative_int(
@@ -164,6 +202,7 @@ def build_replay_decision_intent_id(  # noqa: PLR0913 - explicit deterministic I
         "decision_handler_fingerprint": _validate_decision_handler_fingerprint(
             decision_handler_fingerprint
         ),
+        "evidence_context_reference_id": evidence_context_reference_id,
         "event_id": _validate_required_text(event_id, "event_id"),
         "event_order_index": _validate_strict_non_negative_int(
             event_order_index,
@@ -178,8 +217,8 @@ def build_replay_decision_intent_id(  # noqa: PLR0913 - explicit deterministic I
 
 
 class ReplayDecisionOutputKind(StrEnum):
-    DECISION_INTENT = "replay.decision-intent.v2"
-    NO_TRADE_DECISION = "replay.no-trade-decision.v2"
+    DECISION_INTENT = "replay.decision-intent.v3"
+    NO_TRADE_DECISION = "replay.no-trade-decision.v3"
 
 
 class ReplayDecisionStackContext(BaseModel):
@@ -190,6 +229,7 @@ class ReplayDecisionStackContext(BaseModel):
     dispatch_context: ReplayDispatchContext
     event: ReplayTimelineEvent
     market: ReplayMarketFrameLookupResult
+    evidence: ReplayMarketEvidenceLookupResult
 
     @field_validator("schema_version", mode="before")
     @classmethod
@@ -216,17 +256,24 @@ class ReplayDecisionStackContext(BaseModel):
     def _revalidate_market(cls, value: object) -> ReplayMarketFrameLookupResult:
         return _revalidate_market_lookup_result(value)
 
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _revalidate_evidence(cls, value: object) -> ReplayMarketEvidenceLookupResult:
+        return _revalidate_evidence_lookup_result(value)
+
     @model_validator(mode="after")
     def _validate_context(self) -> Self:
         _validate_decision_context_semantics(
             dispatch_context=self.dispatch_context,
             event=self.event,
             market=self.market,
+            evidence=self.evidence,
         )
         expected = build_replay_decision_stack_context_id(
             dispatch_context=self.dispatch_context,
             event=self.event,
             market=self.market,
+            evidence=self.evidence,
         )
         if self.context_id != expected:
             raise ValueError("context_id must match deterministic decision context ID")
@@ -379,23 +426,109 @@ class ReplayDecisionMarketContextReference(BaseModel):
         return self
 
 
+class ReplayDecisionEvidenceContextReference(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    reference_id: str
+
+    evidence_timeline_id: ReplayMarketEvidenceTimelineId
+    evidence_lookup_authority_fingerprint: str
+    evidence_builder_fingerprint: str
+
+    evidence_lookup_entry_id: ReplayMarketEvidenceLookupEntryId
+    evidence_projection_id: ReplayMarketEvidenceProjectionId
+    evidence_set_id: MarketEvidenceSetId
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value: object) -> object:
+        return _validate_schema_version(value, expected=1)
+
+    @field_validator("reference_id")
+    @classmethod
+    def _validate_reference_id(cls, value: str) -> str:
+        return _validate_evidence_context_reference_id(value)
+
+    @field_validator("evidence_timeline_id", mode="before")
+    @classmethod
+    def _revalidate_evidence_timeline_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketEvidenceTimelineId:
+        return _validate_evidence_timeline_id(value)
+
+    @field_validator("evidence_lookup_authority_fingerprint")
+    @classmethod
+    def _validate_evidence_lookup_authority_fingerprint(cls, value: str) -> str:
+        return _validate_evidence_lookup_authority_fingerprint(value)
+
+    @field_validator("evidence_builder_fingerprint")
+    @classmethod
+    def _validate_evidence_builder_fingerprint(cls, value: str) -> str:
+        return _validate_evidence_builder_fingerprint(value)
+
+    @field_validator("evidence_lookup_entry_id", mode="before")
+    @classmethod
+    def _revalidate_evidence_lookup_entry_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketEvidenceLookupEntryId:
+        return _validate_evidence_lookup_entry_id(value)
+
+    @field_validator("evidence_projection_id", mode="before")
+    @classmethod
+    def _revalidate_evidence_projection_id(
+        cls,
+        value: object,
+    ) -> ReplayMarketEvidenceProjectionId:
+        return _validate_evidence_projection_id(value)
+
+    @field_validator("evidence_set_id", mode="before")
+    @classmethod
+    def _revalidate_evidence_set_id(cls, value: object) -> MarketEvidenceSetId:
+        return _validate_market_evidence_set_id(value)
+
+    @model_validator(mode="after")
+    def _validate_reference(self) -> Self:
+        expected = _build_replay_decision_evidence_context_reference_id_from_fields(
+            evidence_timeline_id=self.evidence_timeline_id,
+            evidence_lookup_authority_fingerprint=(
+                self.evidence_lookup_authority_fingerprint
+            ),
+            evidence_builder_fingerprint=self.evidence_builder_fingerprint,
+            evidence_lookup_entry_id=self.evidence_lookup_entry_id,
+            evidence_projection_id=self.evidence_projection_id,
+            evidence_set_id=self.evidence_set_id,
+        )
+        if self.reference_id != expected:
+            raise ValueError(
+                "reference_id must match deterministic evidence context reference"
+            )
+        return self
+
+
 def build_replay_decision_stack_context_id(
     *,
     dispatch_context: ReplayDispatchContext,
     event: ReplayTimelineEvent,
     market: ReplayMarketFrameLookupResult,
+    evidence: ReplayMarketEvidenceLookupResult,
 ) -> ReplayDecisionContextId:
     dispatch_context = _revalidate_dispatch_context(dispatch_context)
     event = _revalidate_timeline_event(event)
     market = _revalidate_market_lookup_result(market)
+    evidence = _revalidate_evidence_lookup_result(evidence)
     _validate_decision_context_semantics(
         dispatch_context=dispatch_context,
         event=event,
         market=market,
+        evidence=evidence,
     )
     material = {
         "schema_version": 1,
         "dispatch_context": dispatch_context.model_dump(mode="json"),
+        "evidence": evidence.model_dump(mode="json"),
         "event": event.model_dump(mode="json"),
         "market": market.model_dump(mode="json"),
     }
@@ -447,17 +580,20 @@ def build_replay_decision_stack_context(
     dispatch_context: ReplayDispatchContext,
     event: ReplayTimelineEvent,
     market: ReplayMarketFrameLookupResult,
+    evidence: ReplayMarketEvidenceLookupResult,
 ) -> ReplayDecisionStackContext:
     context_id = build_replay_decision_stack_context_id(
         dispatch_context=dispatch_context,
         event=event,
         market=market,
+        evidence=evidence,
     )
     return ReplayDecisionStackContext(
         context_id=context_id,
         dispatch_context=dispatch_context,
         event=event,
         market=market,
+        evidence=evidence,
     )
 
 
@@ -499,12 +635,40 @@ def build_replay_decision_market_context_reference(
     )
 
 
+def build_replay_decision_evidence_context_reference(
+    context: ReplayDecisionStackContext,
+) -> ReplayDecisionEvidenceContextReference:
+    context = ReplayDecisionStackContext.model_validate(context.model_dump())
+    evidence = context.evidence
+    reference_id = _build_replay_decision_evidence_context_reference_id_from_fields(
+        evidence_timeline_id=evidence.descriptor.evidence_timeline_id,
+        evidence_lookup_authority_fingerprint=(
+            evidence.descriptor.evidence_lookup_authority_fingerprint
+        ),
+        evidence_builder_fingerprint=evidence.descriptor.evidence_builder_fingerprint,
+        evidence_lookup_entry_id=evidence.entry.entry_id,
+        evidence_projection_id=evidence.projection.projection_id,
+        evidence_set_id=evidence.projection.evidence_set.evidence_set_id,
+    )
+    return ReplayDecisionEvidenceContextReference(
+        reference_id=reference_id,
+        evidence_timeline_id=evidence.descriptor.evidence_timeline_id,
+        evidence_lookup_authority_fingerprint=(
+            evidence.descriptor.evidence_lookup_authority_fingerprint
+        ),
+        evidence_builder_fingerprint=evidence.descriptor.evidence_builder_fingerprint,
+        evidence_lookup_entry_id=evidence.entry.entry_id,
+        evidence_projection_id=evidence.projection.projection_id,
+        evidence_set_id=evidence.projection.evidence_set.evidence_set_id,
+    )
+
+
 class ReplayDecisionOutputEnvelope(BaseModel):
     """Typed canonical replay output for one DecisionStack decision."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
 
     run_id: str
     manifest_id: str
@@ -519,7 +683,9 @@ class ReplayDecisionOutputEnvelope(BaseModel):
 
     stack_descriptor: ReplayDecisionStackDescriptor
     market_lookup_descriptor: ReplayMarketFrameLookupDescriptor
+    evidence_lookup_descriptor: ReplayMarketEvidenceLookupDescriptor
     market_context_reference: ReplayDecisionMarketContextReference
+    evidence_context_reference: ReplayDecisionEvidenceContextReference
     decision_index: int
     decision_kind: ReplayDecisionOutputKind
 
@@ -529,7 +695,7 @@ class ReplayDecisionOutputEnvelope(BaseModel):
     @field_validator("schema_version", mode="before")
     @classmethod
     def _validate_schema_version(cls, value: object) -> object:
-        return _validate_schema_version(value, expected=2)
+        return _validate_schema_version(value, expected=3)
 
     @field_validator(
         "run_id",
@@ -571,6 +737,14 @@ class ReplayDecisionOutputEnvelope(BaseModel):
     ) -> ReplayMarketFrameLookupDescriptor:
         return _revalidate_market_lookup_descriptor(value)
 
+    @field_validator("evidence_lookup_descriptor", mode="before")
+    @classmethod
+    def _revalidate_evidence_lookup_descriptor(
+        cls,
+        value: object,
+    ) -> ReplayMarketEvidenceLookupDescriptor:
+        return _revalidate_evidence_lookup_descriptor(value)
+
     @field_validator("market_context_reference", mode="before")
     @classmethod
     def _revalidate_market_context_reference(
@@ -578,6 +752,14 @@ class ReplayDecisionOutputEnvelope(BaseModel):
         value: object,
     ) -> ReplayDecisionMarketContextReference:
         return _revalidate_market_context_reference(value)
+
+    @field_validator("evidence_context_reference", mode="before")
+    @classmethod
+    def _revalidate_evidence_context_reference(
+        cls,
+        value: object,
+    ) -> ReplayDecisionEvidenceContextReference:
+        return _revalidate_evidence_context_reference(value)
 
     @field_validator("decision_intent", mode="before")
     @classmethod
@@ -603,11 +785,17 @@ class ReplayDecisionOutputEnvelope(BaseModel):
             raise ValueError("event_kind must be supported by stack_descriptor")
         if self.event_kind not in self.market_lookup_descriptor.supported_event_kinds:
             raise ValueError("event_kind must be supported by market_lookup_descriptor")
+        if self.event_kind not in self.evidence_lookup_descriptor.supported_event_kinds:
+            raise ValueError("event_kind must be supported by evidence_lookup_descriptor")
         if self.timeline_id != self.market_lookup_descriptor.replay_timeline_id:
             raise ValueError("timeline_id must match market lookup descriptor")
         if self.replay_plan_id != self.market_lookup_descriptor.replay_plan_id:
             raise ValueError("replay_plan_id must match market lookup descriptor")
-        reference = self.market_context_reference
+        if self.timeline_id != self.evidence_lookup_descriptor.replay_timeline_id:
+            raise ValueError("timeline_id must match evidence lookup descriptor")
+        if self.replay_plan_id != self.evidence_lookup_descriptor.replay_plan_id:
+            raise ValueError("replay_plan_id must match evidence lookup descriptor")
+        market_reference = self.market_context_reference
         reference_values = {
             "run_id": self.run_id,
             "manifest_id": self.manifest_id,
@@ -621,25 +809,43 @@ class ReplayDecisionOutputEnvelope(BaseModel):
             "event_kind": self.event_kind,
         }
         for field_name, expected in reference_values.items():
-            if getattr(reference, field_name) != expected:
+            if getattr(market_reference, field_name) != expected:
                 raise ValueError(
                     f"market context reference {field_name} must match envelope"
                 )
         if (
-            reference.market_timeline_id
+            market_reference.market_timeline_id
             != self.market_lookup_descriptor.market_timeline_id
         ):
             raise ValueError("market context reference timeline must match lookup")
         if (
-            reference.lookup_authority_fingerprint
+            market_reference.lookup_authority_fingerprint
             != self.market_lookup_descriptor.lookup_authority_fingerprint
         ):
             raise ValueError("market context reference lookup authority must match lookup")
         if (
-            reference.adapter_fingerprint
+            market_reference.adapter_fingerprint
             != self.market_lookup_descriptor.adapter_fingerprint
         ):
             raise ValueError("market context reference adapter must match lookup")
+        evidence_reference = self.evidence_context_reference
+        if (
+            evidence_reference.evidence_timeline_id
+            != self.evidence_lookup_descriptor.evidence_timeline_id
+        ):
+            raise ValueError("evidence context reference timeline must match lookup")
+        if (
+            evidence_reference.evidence_lookup_authority_fingerprint
+            != self.evidence_lookup_descriptor.evidence_lookup_authority_fingerprint
+        ):
+            raise ValueError(
+                "evidence context reference lookup authority must match lookup"
+            )
+        if (
+            evidence_reference.evidence_builder_fingerprint
+            != self.evidence_lookup_descriptor.evidence_builder_fingerprint
+        ):
+            raise ValueError("evidence context reference builder must match lookup")
 
         decision = _populated_decision_for_kind(
             self.decision_kind,
@@ -654,8 +860,10 @@ class ReplayDecisionOutputEnvelope(BaseModel):
             decision_handler_fingerprint=build_replay_decision_handler_fingerprint(
                 stack_descriptor=self.stack_descriptor,
                 market_lookup_descriptor=self.market_lookup_descriptor,
+                evidence_lookup_descriptor=self.evidence_lookup_descriptor,
             ),
-            market_context_reference_id=reference.reference_id,
+            market_context_reference_id=market_reference.reference_id,
+            evidence_context_reference_id=evidence_reference.reference_id,
             decision_index=self.decision_index,
         )
         if decision.decision_intent_id != expected_id:
@@ -715,6 +923,7 @@ def decode_replay_decision_output_record(
     if revalidated.handler_id != build_replay_decision_handler_fingerprint(
         stack_descriptor=envelope.stack_descriptor,
         market_lookup_descriptor=envelope.market_lookup_descriptor,
+        evidence_lookup_descriptor=envelope.evidence_lookup_descriptor,
     ):
         raise ValueError("output record handler_id must match decision handler fingerprint")
     if revalidated.handler_version != envelope.stack_descriptor.stack_version:
@@ -773,10 +982,26 @@ def _revalidate_market_lookup_descriptor(
     return ReplayMarketFrameLookupDescriptor.model_validate(value)
 
 
+def _revalidate_evidence_lookup_descriptor(
+    value: object,
+) -> ReplayMarketEvidenceLookupDescriptor:
+    if isinstance(value, ReplayMarketEvidenceLookupDescriptor):
+        return ReplayMarketEvidenceLookupDescriptor.model_validate(value.model_dump())
+    return ReplayMarketEvidenceLookupDescriptor.model_validate(value)
+
+
 def _revalidate_market_lookup_result(value: object) -> ReplayMarketFrameLookupResult:
     if isinstance(value, ReplayMarketFrameLookupResult):
         return ReplayMarketFrameLookupResult.model_validate(value.model_dump())
     return ReplayMarketFrameLookupResult.model_validate(value)
+
+
+def _revalidate_evidence_lookup_result(
+    value: object,
+) -> ReplayMarketEvidenceLookupResult:
+    if isinstance(value, ReplayMarketEvidenceLookupResult):
+        return ReplayMarketEvidenceLookupResult.model_validate(value.model_dump())
+    return ReplayMarketEvidenceLookupResult.model_validate(value)
 
 
 def _revalidate_market_context_reference(
@@ -787,11 +1012,20 @@ def _revalidate_market_context_reference(
     return ReplayDecisionMarketContextReference.model_validate(value)
 
 
-def _validate_decision_context_semantics(
+def _revalidate_evidence_context_reference(
+    value: object,
+) -> ReplayDecisionEvidenceContextReference:
+    if isinstance(value, ReplayDecisionEvidenceContextReference):
+        return ReplayDecisionEvidenceContextReference.model_validate(value.model_dump())
+    return ReplayDecisionEvidenceContextReference.model_validate(value)
+
+
+def _validate_decision_context_semantics(  # noqa: PLR0912 - explicit identity checks
     *,
     dispatch_context: ReplayDispatchContext,
     event: ReplayTimelineEvent,
     market: ReplayMarketFrameLookupResult,
+    evidence: ReplayMarketEvidenceLookupResult,
 ) -> None:
     if dispatch_context.event_id != event.event_id:
         raise ValueError("dispatch context event_id must match event")
@@ -805,6 +1039,10 @@ def _validate_decision_context_semantics(
         raise ValueError("dispatch context timeline_id must match market descriptor")
     if dispatch_context.replay_plan_id != market.descriptor.replay_plan_id:
         raise ValueError("dispatch context replay_plan_id must match market descriptor")
+    if dispatch_context.timeline_id != evidence.descriptor.replay_timeline_id:
+        raise ValueError("dispatch context timeline_id must match evidence descriptor")
+    if dispatch_context.replay_plan_id != evidence.descriptor.replay_plan_id:
+        raise ValueError("dispatch context replay_plan_id must match evidence descriptor")
     observation_projection = market.observation_projection
     if event.event_id != observation_projection.event_id:
         raise ValueError("event_id must match market observation projection")
@@ -814,6 +1052,29 @@ def _validate_decision_context_semantics(
         raise ValueError("event_time must match market observation projection")
     if event.kind != observation_projection.event_kind:
         raise ValueError("event kind must match market observation projection")
+    if event.event_id != market.frame_projection.event_id:
+        raise ValueError("event_id must match market frame projection")
+    if event.order_index != market.frame_projection.event_order_index:
+        raise ValueError("event order_index must match market frame projection")
+    if event.event_time != market.frame_projection.event_time:
+        raise ValueError("event_time must match market frame projection")
+    if event.event_id != market.entry.event_id:
+        raise ValueError("event_id must match market lookup entry")
+    if event.order_index != market.entry.event_order_index:
+        raise ValueError("event order_index must match market lookup entry")
+    if event.event_time != market.entry.event_time:
+        raise ValueError("event_time must match market lookup entry")
+    if event.kind != market.entry.event_kind:
+        raise ValueError("event kind must match market lookup entry")
+    if event.event_id != evidence.entry.event_id:
+        raise ValueError("event_id must match evidence lookup entry")
+    if event.order_index != evidence.entry.event_order_index:
+        raise ValueError("event order_index must match evidence lookup entry")
+    if event.event_time != evidence.entry.event_time:
+        raise ValueError("event_time must match evidence lookup entry")
+    if event.kind != evidence.entry.event_kind:
+        raise ValueError("event kind must match evidence lookup entry")
+    _validate_market_and_evidence_context_match(market=market, evidence=evidence)
 
 
 def _validate_dispatch_context_matches_market(
@@ -834,6 +1095,32 @@ def _validate_dispatch_context_matches_market(
         raise ValueError("dispatch context event_time must match market projection")
     if dispatch_context.event_kind != observation_projection.event_kind:
         raise ValueError("dispatch context event_kind must match market projection")
+
+
+def _validate_market_and_evidence_context_match(
+    *,
+    market: ReplayMarketFrameLookupResult,
+    evidence: ReplayMarketEvidenceLookupResult,
+) -> None:
+    if market.entry != evidence.projection.market_lookup_entry:
+        raise ValueError("market lookup entry must match evidence projection entry")
+    if market.frame_projection != evidence.projection.market_frame_projection:
+        raise ValueError("market frame projection must match evidence projection")
+    if market.frame_projection.frame != evidence.projection.evidence_set.source_frame:
+        raise ValueError("market frame must match evidence set source frame")
+    checks = (
+        ("event_id", market.entry.event_id, evidence.entry.event_id),
+        (
+            "event_order_index",
+            market.entry.event_order_index,
+            evidence.entry.event_order_index,
+        ),
+        ("event_time", market.entry.event_time, evidence.entry.event_time),
+        ("event_kind", market.entry.event_kind, evidence.entry.event_kind),
+    )
+    for field_name, actual, expected in checks:
+        if actual != expected:
+            raise ValueError(f"market and evidence {field_name} must match")
 
 
 def _build_replay_decision_market_context_reference_id_from_fields(  # noqa: PLR0913
@@ -914,6 +1201,44 @@ def _build_replay_decision_market_context_reference_id_from_fields(  # noqa: PLR
     )
 
 
+def _build_replay_decision_evidence_context_reference_id_from_fields(  # noqa: PLR0913
+    *,
+    evidence_timeline_id: ReplayMarketEvidenceTimelineId,
+    evidence_lookup_authority_fingerprint: str,
+    evidence_builder_fingerprint: str,
+    evidence_lookup_entry_id: ReplayMarketEvidenceLookupEntryId,
+    evidence_projection_id: ReplayMarketEvidenceProjectionId,
+    evidence_set_id: MarketEvidenceSetId,
+) -> str:
+    material = {
+        "schema_version": 1,
+        "evidence_builder_fingerprint": _validate_evidence_builder_fingerprint(
+            evidence_builder_fingerprint
+        ),
+        "evidence_lookup_authority_fingerprint": (
+            _validate_evidence_lookup_authority_fingerprint(
+                evidence_lookup_authority_fingerprint
+            )
+        ),
+        "evidence_lookup_entry_id": _validate_evidence_lookup_entry_id(
+            evidence_lookup_entry_id
+        ).model_dump(mode="json"),
+        "evidence_projection_id": _validate_evidence_projection_id(
+            evidence_projection_id
+        ).model_dump(mode="json"),
+        "evidence_set_id": _validate_market_evidence_set_id(
+            evidence_set_id
+        ).model_dump(mode="json"),
+        "evidence_timeline_id": _validate_evidence_timeline_id(
+            evidence_timeline_id
+        ).model_dump(mode="json"),
+    }
+    return (
+        "replay-decision-evidence-context-reference:"
+        f"{_sha256_text(_canonical_json(material))}"
+    )
+
+
 def _validate_replay_decision_context_id(value: object) -> ReplayDecisionContextId:
     context_id = _revalidate_domain_id(ReplayDecisionContextId, value)
     if not _REPLAY_DECISION_CONTEXT_ID_RE.fullmatch(str(context_id)):
@@ -933,10 +1258,31 @@ def _validate_market_context_reference_id(
     return reference_id
 
 
+def _validate_evidence_context_reference_id(value: str) -> str:
+    value = _validate_required_text(value, "evidence_context_reference_id")
+    if not _REPLAY_DECISION_EVIDENCE_CONTEXT_REFERENCE_ID_RE.fullmatch(value):
+        raise ValueError(
+            "evidence_context_reference_id must match "
+            "replay-decision-evidence-context-reference:<64 lowercase hex>"
+        )
+    return value
+
+
 def _validate_market_timeline_id(value: object) -> ReplayMarketFrameTimelineId:
     timeline_id = _revalidate_domain_id(ReplayMarketFrameTimelineId, value)
     if not _REPLAY_MARKET_TIMELINE_ID_RE.fullmatch(str(timeline_id)):
         raise ValueError("market_timeline_id must match replay-market-frame-timeline:<64 hex>")
+    return timeline_id
+
+
+def _validate_evidence_timeline_id(
+    value: object,
+) -> ReplayMarketEvidenceTimelineId:
+    timeline_id = _revalidate_domain_id(ReplayMarketEvidenceTimelineId, value)
+    if not _REPLAY_MARKET_EVIDENCE_TIMELINE_ID_RE.fullmatch(str(timeline_id)):
+        raise ValueError(
+            "evidence_timeline_id must match replay-market-evidence-timeline:<64 hex>"
+        )
     return timeline_id
 
 
@@ -948,6 +1294,30 @@ def _validate_observation_projection_id(
         raise ValueError(
             "observation_projection_id must match "
             "replay-market-observation-projection:<64 hex>"
+        )
+    return projection_id
+
+
+def _validate_evidence_lookup_entry_id(
+    value: object,
+) -> ReplayMarketEvidenceLookupEntryId:
+    entry_id = _revalidate_domain_id(ReplayMarketEvidenceLookupEntryId, value)
+    if not _REPLAY_MARKET_EVIDENCE_LOOKUP_ENTRY_ID_RE.fullmatch(str(entry_id)):
+        raise ValueError(
+            "evidence_lookup_entry_id must match "
+            "replay-market-evidence-lookup-entry:<64 hex>"
+        )
+    return entry_id
+
+
+def _validate_evidence_projection_id(
+    value: object,
+) -> ReplayMarketEvidenceProjectionId:
+    projection_id = _revalidate_domain_id(ReplayMarketEvidenceProjectionId, value)
+    if not _REPLAY_MARKET_EVIDENCE_PROJECTION_ID_RE.fullmatch(str(projection_id)):
+        raise ValueError(
+            "evidence_projection_id must match "
+            "replay-market-evidence-projection:<64 hex>"
         )
     return projection_id
 
@@ -975,12 +1345,39 @@ def _validate_market_observation_id(value: object) -> MarketObservationId:
     return observation_id
 
 
+def _validate_market_evidence_set_id(value: object) -> MarketEvidenceSetId:
+    evidence_set_id = _revalidate_domain_id(MarketEvidenceSetId, value)
+    if not _MARKET_EVIDENCE_SET_ID_RE.fullmatch(str(evidence_set_id)):
+        raise ValueError("evidence_set_id must match market-evidence-set:<64 hex>")
+    return evidence_set_id
+
+
 def _validate_decision_handler_fingerprint(value: str) -> str:
     value = _validate_required_text(value, "decision_handler_fingerprint")
     if not _DECISION_HANDLER_FINGERPRINT_RE.fullmatch(value):
         raise ValueError(
             "decision_handler_fingerprint must match "
             "replay-decision-handler:<64 lowercase hex>"
+        )
+    return value
+
+
+def _validate_evidence_lookup_authority_fingerprint(value: str) -> str:
+    value = _validate_required_text(value, "evidence_lookup_authority_fingerprint")
+    if not _REPLAY_MARKET_EVIDENCE_LOOKUP_AUTHORITY_FINGERPRINT_RE.fullmatch(value):
+        raise ValueError(
+            "evidence_lookup_authority_fingerprint must match "
+            "replay-market-evidence-lookup-authority:<64 hex>"
+        )
+    return value
+
+
+def _validate_evidence_builder_fingerprint(value: str) -> str:
+    value = _validate_required_text(value, "evidence_builder_fingerprint")
+    if not _MARKET_EVIDENCE_BUILDER_FINGERPRINT_RE.fullmatch(value):
+        raise ValueError(
+            "evidence_builder_fingerprint must match "
+            "market-evidence-builder:<64 hex>"
         )
     return value
 
