@@ -1103,3 +1103,54 @@ def test_market_evidence_sources_do_not_use_forbidden_runtime_dependencies() -> 
         source = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_live_state_sources_do_not_use_external_infra_or_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/live_state.py",
+        ROOT / "src/futures_bot/ports/live_state.py",
+        ROOT / "src/futures_bot/live_state/in_memory.py",
+        ROOT / "src/futures_bot/live_state/stitcher.py",
+    )
+    forbidden = (
+        "redis",
+        "kafka",
+        "confluent_kafka",
+        "aiokafka",
+        "psycopg",
+        "sqlalchemy",
+        "asyncpg",
+        "pandas",
+        "numpy",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "OrderIntent",
+        "ExecutionIntent",
+        "RiskGate",
+        "DecisionStack",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_live_state_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/live_state.py")
+    assert not any("infrastructure" in line for line in lines)

@@ -227,3 +227,35 @@ class ReplayMarketEvidenceTimelineId(DomainId):
 
 class ReplayMarketEvidenceLookupEntryId(DomainId):
     pass
+
+
+class StreamId(DomainId):
+    pass
+
+
+class StreamPartitionId(DomainId):
+    pass
+
+
+class StreamEventId(DomainId):
+    pass
+
+
+class LiveStateSnapshotId(DomainId):
+    pass
+
+
+class HistoricalStateSliceId(DomainId):
+    pass
+
+
+class LiveTailSliceId(DomainId):
+    pass
+
+
+class StitchedStateSliceId(DomainId):
+    pass
+
+
+class DbWriterCheckpointId(DomainId):
+    pass
