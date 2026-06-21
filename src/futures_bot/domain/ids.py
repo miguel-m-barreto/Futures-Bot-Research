@@ -259,3 +259,55 @@ class StitchedStateSliceId(DomainId):
 
 class DbWriterCheckpointId(DomainId):
     pass
+
+
+class RuntimeControlCommandId(DomainId):
+    pass
+
+
+class RuntimeControlEventId(DomainId):
+    pass
+
+
+class RuntimeStateTransitionId(DomainId):
+    pass
+
+
+class ProgramRuntimeId(DomainId):
+    pass
+
+
+class DecisionStackRuntimeId(DomainId):
+    pass
+
+
+class RuntimeCheckpointId(DomainId):
+    pass
+
+
+class RuntimeManifestId(DomainId):
+    pass
+
+
+class ExposureStateId(DomainId):
+    pass
+
+
+class ExposureRecoveryPlanId(DomainId):
+    pass
+
+
+class KillSwitchId(DomainId):
+    pass
+
+
+class WarmupPolicyId(DomainId):
+    pass
+
+
+class ResyncPlanId(DomainId):
+    pass
+
+
+class RuntimeDataHealthSnapshotId(DomainId):
+    pass
