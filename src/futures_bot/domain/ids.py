@@ -93,6 +93,42 @@ class OrderIntentId(DomainId):
     pass
 
 
+class CancelOrderIntentId(DomainId):
+    pass
+
+
+class ReplaceOrderIntentId(DomainId):
+    pass
+
+
+class OrderLifecycleEventId(DomainId):
+    pass
+
+
+class ExecutionOrderRecordId(DomainId):
+    pass
+
+
+class FillReportId(DomainId):
+    pass
+
+
+class ClientOrderId(DomainId):
+    pass
+
+
+class OrderIdempotencyKey(DomainId):
+    pass
+
+
+class VenueOrderId(DomainId):
+    pass
+
+
+class ExecutionReconciliationId(DomainId):
+    pass
+
+
 class ExchangeOrderId(DomainId):
     pass
 

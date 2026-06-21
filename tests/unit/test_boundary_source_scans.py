@@ -1207,3 +1207,56 @@ def test_runtime_control_sources_do_not_use_external_infra_or_runtime_dependenci
 def test_runtime_control_ports_do_not_import_infrastructure() -> None:
     lines = _import_lines(ROOT / "src/futures_bot/ports/runtime_control.py")
     assert not any("infrastructure" in line for line in lines)
+
+
+def test_order_lifecycle_sources_do_not_use_external_infra_or_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/order_lifecycle.py",
+        ROOT / "src/futures_bot/ports/order_lifecycle.py",
+        ROOT / "src/futures_bot/order_lifecycle/in_memory.py",
+        ROOT / "src/futures_bot/order_lifecycle/policies.py",
+    )
+    forbidden = (
+        "redis",
+        "kafka",
+        "confluent_kafka",
+        "aiokafka",
+        "psycopg",
+        "sqlalchemy",
+        "asyncpg",
+        "pandas",
+        "numpy",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+        "BotBlueprint",
+        "BotInstance",
+        "HardRiskGate",
+        "Ledger",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_order_lifecycle_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/order_lifecycle.py")
+    assert not any("infrastructure" in line for line in lines)
