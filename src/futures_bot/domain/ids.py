@@ -149,6 +149,26 @@ class ExecutionSubmissionRequestId(DomainId):
     pass
 
 
+class VenueCapabilitySnapshotId(DomainId):
+    pass
+
+
+class VenueInstrumentRuleSnapshotId(DomainId):
+    pass
+
+
+class VenueRateLimitProfileId(DomainId):
+    pass
+
+
+class VenueOrderValidationId(DomainId):
+    pass
+
+
+class DeadManSwitchCapabilityId(DomainId):
+    pass
+
+
 class ExchangeOrderId(DomainId):
     pass
 

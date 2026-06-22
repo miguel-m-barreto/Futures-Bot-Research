@@ -1313,3 +1313,56 @@ def test_execution_manager_sources_do_not_use_external_infra_or_runtime_dependen
 def test_execution_manager_ports_do_not_import_infrastructure() -> None:
     lines = _import_lines(ROOT / "src/futures_bot/ports/execution_manager.py")
     assert not any("infrastructure" in line for line in lines)
+
+
+def test_venue_capability_sources_do_not_use_external_infra_or_runtime_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/venue_capabilities.py",
+        ROOT / "src/futures_bot/ports/venue_capabilities.py",
+        ROOT / "src/futures_bot/venue_capabilities/in_memory.py",
+        ROOT / "src/futures_bot/venue_capabilities/validator.py",
+    )
+    forbidden = (
+        "redis",
+        "kafka",
+        "confluent_kafka",
+        "aiokafka",
+        "psycopg",
+        "sqlalchemy",
+        "asyncpg",
+        "pandas",
+        "numpy",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+        "BotBlueprint",
+        "BotInstance",
+        "HardRiskGate",
+        "Ledger",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_venue_capability_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/venue_capabilities.py")
+    assert not any("infrastructure" in line for line in lines)
