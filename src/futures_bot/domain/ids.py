@@ -129,6 +129,26 @@ class ExecutionReconciliationId(DomainId):
     pass
 
 
+class ExecutionAdmissionRequestId(DomainId):
+    pass
+
+
+class ExecutionAdmissionDecisionId(DomainId):
+    pass
+
+
+class ExecutionCoordinatorRunId(DomainId):
+    pass
+
+
+class ExecutionCoordinatorEventId(DomainId):
+    pass
+
+
+class ExecutionSubmissionRequestId(DomainId):
+    pass
+
+
 class ExchangeOrderId(DomainId):
     pass
 

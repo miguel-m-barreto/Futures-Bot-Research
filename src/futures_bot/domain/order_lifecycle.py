@@ -678,7 +678,11 @@ _ALLOWED_TRANSITIONS: dict[OrderLifecycleState, frozenset[OrderLifecycleState]] 
         }
     ),
     OrderLifecycleState.ACCEPTED_BY_EXECUTION: frozenset(
-        {OrderLifecycleState.SUBMISSION_REQUESTED}
+        {
+            OrderLifecycleState.SUBMISSION_REQUESTED,
+            OrderLifecycleState.CANCEL_REQUESTED,
+            OrderLifecycleState.REPLACE_REQUESTED,
+        }
     ),
     OrderLifecycleState.SUBMISSION_REQUESTED: frozenset(
         {OrderLifecycleState.SUBMITTED_TO_VENUE, OrderLifecycleState.UNKNOWN_ON_VENUE}
