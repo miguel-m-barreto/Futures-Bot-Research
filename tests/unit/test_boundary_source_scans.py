@@ -1366,3 +1366,95 @@ def test_venue_capability_sources_do_not_use_external_infra_or_runtime_dependenc
 def test_venue_capability_ports_do_not_import_infrastructure() -> None:
     lines = _import_lines(ROOT / "src/futures_bot/ports/venue_capabilities.py")
     assert not any("infrastructure" in line for line in lines)
+
+
+def test_execution_capability_gate_sources_do_not_use_external_infra() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/execution_capability_gate.py",
+        ROOT / "src/futures_bot/ports/execution_capability_gate.py",
+        ROOT / "src/futures_bot/execution_manager/capability_gate.py",
+    )
+    forbidden = (
+        "redis",
+        "kafka",
+        "confluent_kafka",
+        "aiokafka",
+        "psycopg",
+        "sqlalchemy",
+        "asyncpg",
+        "pandas",
+        "numpy",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+        "BotBlueprint",
+        "BotInstance",
+        "HardRiskGate",
+        "Ledger",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_execution_capability_gate_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/execution_capability_gate.py")
+    assert not any("infrastructure" in line for line in lines)
+
+
+def test_execution_capability_gate_test_files_do_not_import_forbidden_dependencies() -> None:
+    gate_test_files = (
+        ROOT / "tests/unit/test_execution_capability_gate_domain.py",
+        ROOT / "tests/unit/test_execution_capability_gate.py",
+        ROOT / "tests/unit/test_execution_manager_capability_integration.py",
+        ROOT / "tests/unit/test_execution_manager_replace_capability_integration.py",
+    )
+    forbidden = (
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "pandas",
+        "numpy",
+        "sklearn",
+        "torch",
+        "matplotlib",
+        "plotly",
+        "seaborn",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+    )
+    for path in gate_test_files:
+        if not path.exists():
+            continue
+        lines = _import_lines(path)
+        for name in forbidden:
+            assert not any(name in line for line in lines), (
+                f"found {name!r} import in {path.name}"
+            )

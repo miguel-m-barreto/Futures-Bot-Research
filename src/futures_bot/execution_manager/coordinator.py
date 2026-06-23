@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from futures_bot.domain.execution_capability_gate import ExecutionCapabilityCheck
 from futures_bot.domain.execution_manager import (
     ExecutionAdmissionDecision,
     ExecutionAdmissionDecisionReason,
@@ -32,6 +33,7 @@ from futures_bot.domain.order_lifecycle import (
     canonical_payload_hash,
 )
 from futures_bot.domain.runtime_control import RuntimeDataScopeKind
+from futures_bot.execution_manager.capability_gate import DeterministicExecutionCapabilityGate
 from futures_bot.order_lifecycle.policies import (
     evaluate_cancel_intent_permission,
     evaluate_order_intent_permission,
@@ -71,6 +73,7 @@ class DeterministicExecutionManagerCoordinator:
         reconciliation_store: ExecutionReconciliationStorePort,
         admission_decision_store: ExecutionAdmissionDecisionStorePort | None = None,
         coordinator_event_store: ExecutionCoordinatorEventStorePort | None = None,
+        capability_gate: DeterministicExecutionCapabilityGate | None = None,
     ) -> None:
         self._intent_journal = intent_journal
         self._lifecycle_events = lifecycle_event_store
@@ -78,6 +81,7 @@ class DeterministicExecutionManagerCoordinator:
         self._reconciliation = reconciliation_store
         self._decisions = admission_decision_store
         self._coordinator_events = coordinator_event_store
+        self._capability_gate = capability_gate or DeterministicExecutionCapabilityGate()
 
     def admit(
         self,
@@ -98,7 +102,7 @@ class DeterministicExecutionManagerCoordinator:
         self._store_decision(decision)
         return decision
 
-    def _admit_order_intent(
+    def _admit_order_intent(  # noqa: PLR0911
         self,
         request: ExecutionAdmissionRequest,
         order_intent: OrderIntent,
@@ -157,6 +161,81 @@ class DeterministicExecutionManagerCoordinator:
                 lifecycle_event_ids=(created_event.event_id, rejected_event.event_id),
             )
 
+        accepted_venue_reason: str | None = None
+        accepted_venue_details: Any = None
+
+        if request.require_venue_capability_validation:
+            ctx = request.venue_validation_context
+            if ctx is None:
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.VENUE_CAPABILITY_CONTEXT_REQUIRED,
+                    order_intent_id=order_intent.intent_id,
+                    client_order_id=order_intent.client_order_id,
+                    lifecycle_event_ids=(created_event.event_id,),
+                )
+            if ctx.order_intent != order_intent:
+                rejected_event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "request_id": str(request.request_id),
+                        "validation_reason": "venue_capability_context_mismatch",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.VENUE_CAPABILITY_CONTEXT_MISMATCH,
+                    order_intent_id=order_intent.intent_id,
+                    client_order_id=order_intent.client_order_id,
+                    lifecycle_event_ids=(created_event.event_id, rejected_event.event_id),
+                    venue_validation_reason="VALIDATION_CONTEXT_MISMATCH",
+                    venue_validation_details={"message": "order_intent mismatch with context"},
+                )
+            check = ExecutionCapabilityCheck(
+                order_intent=order_intent,
+                venue_validation_context=ctx,
+                requested_at=request.requested_at,
+                requested_by=request.requested_by,
+                correlation_id=request.correlation_id,
+            )
+            gate_decision = self._capability_gate.check(check)
+            if not gate_decision.executable:
+                rejected_event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "request_id": str(request.request_id),
+                        "order_intent_id": str(order_intent.intent_id),
+                        "client_order_id": str(order_intent.client_order_id),
+                        "venue_validation_reason": gate_decision.venue_validation_reason,
+                        "venue_validation_details": gate_decision.venue_validation_details,
+                        "stage": "rejected_by_venue_capability",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY,
+                    order_intent_id=order_intent.intent_id,
+                    client_order_id=order_intent.client_order_id,
+                    lifecycle_event_ids=(created_event.event_id, rejected_event.event_id),
+                    venue_validation_reason=gate_decision.venue_validation_reason,
+                    venue_validation_details=gate_decision.venue_validation_details,
+                )
+            accepted_venue_reason = gate_decision.venue_validation_reason
+            accepted_venue_details = gate_decision.venue_validation_details
+
         self._intent_journal.append_order_intent(order_intent)
         record_id = deterministic_execution_order_record_id(order_intent)
         accepted_event = self._append_lifecycle_event(
@@ -184,6 +263,8 @@ class DeterministicExecutionManagerCoordinator:
             client_order_id=order_intent.client_order_id,
             record_id=record_id,
             lifecycle_event_ids=(created_event.event_id, accepted_event.event_id),
+            venue_validation_reason=accepted_venue_reason,
+            venue_validation_details=accepted_venue_details,
         )
 
     def _admit_cancel_intent(
@@ -262,7 +343,7 @@ class DeterministicExecutionManagerCoordinator:
             lifecycle_event_ids=(event.event_id,),
         )
 
-    def _admit_replace_intent(
+    def _admit_replace_intent(  # noqa: PLR0911
         self,
         request: ExecutionAdmissionRequest,
         replace_intent: ReplaceOrderIntent,
@@ -345,6 +426,84 @@ class DeterministicExecutionManagerCoordinator:
                 replace_intent_id=replace_intent.replace_intent_id,
                 client_order_id=replacement.client_order_id,
             )
+
+        accepted_venue_reason: str | None = None
+        accepted_venue_details: Any = None
+
+        if request.require_venue_capability_validation:
+            ctx = request.venue_validation_context
+            if ctx is None:
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.VENUE_CAPABILITY_CONTEXT_REQUIRED,
+                    replace_intent_id=replace_intent.replace_intent_id,
+                    client_order_id=target.client_order_id,
+                    record_id=target.record_id,
+                )
+            if ctx.order_intent != replacement:
+                event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=target.order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "replace_intent_id": str(replace_intent.replace_intent_id),
+                        "validation_reason": "venue_capability_context_mismatch",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.VENUE_CAPABILITY_CONTEXT_MISMATCH,
+                    replace_intent_id=replace_intent.replace_intent_id,
+                    client_order_id=target.client_order_id,
+                    record_id=target.record_id,
+                    lifecycle_event_ids=(event.event_id,),
+                    venue_validation_reason="VALIDATION_CONTEXT_MISMATCH",
+                    venue_validation_details={"message": "order_intent mismatch with context"},
+                )
+            check = ExecutionCapabilityCheck(
+                order_intent=replacement,
+                venue_validation_context=ctx,
+                requested_at=request.requested_at,
+                requested_by=request.requested_by,
+                correlation_id=request.correlation_id,
+            )
+            gate_decision = self._capability_gate.check(check)
+            if not gate_decision.executable:
+                rejected_event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=target.order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "replace_intent_id": str(replace_intent.replace_intent_id),
+                        "order_intent_id": str(replacement.intent_id),
+                        "client_order_id": str(replacement.client_order_id),
+                        "venue_validation_reason": gate_decision.venue_validation_reason,
+                        "venue_validation_details": gate_decision.venue_validation_details,
+                        "stage": "rejected_by_venue_capability",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY,
+                    replace_intent_id=replace_intent.replace_intent_id,
+                    client_order_id=target.client_order_id,
+                    record_id=target.record_id,
+                    lifecycle_event_ids=(rejected_event.event_id,),
+                    venue_validation_reason=gate_decision.venue_validation_reason,
+                    venue_validation_details=gate_decision.venue_validation_details,
+                )
+            accepted_venue_reason = gate_decision.venue_validation_reason
+            accepted_venue_details = gate_decision.venue_validation_details
+
         self._intent_journal.append_replace_intent(replace_intent)
         target_event = self._append_lifecycle_event(
             request=request,
@@ -392,6 +551,8 @@ class DeterministicExecutionManagerCoordinator:
             client_order_id=replacement.client_order_id,
             record_id=replacement_record_id,
             lifecycle_event_ids=(target_event.event_id, replacement_event.event_id),
+            venue_validation_reason=accepted_venue_reason,
+            venue_validation_details=accepted_venue_details,
         )
 
     def _append_lifecycle_event(  # noqa: PLR0913
@@ -528,6 +689,8 @@ class DeterministicExecutionManagerCoordinator:
         record_id: ExecutionOrderRecordId | None = None,
         lifecycle_event_ids: tuple[OrderLifecycleEventId | None, ...] = (),
         reconciliation_marker_ids: tuple[ExecutionReconciliationId, ...] = (),
+        venue_validation_reason: str | None = None,
+        venue_validation_details: Any = None,
     ) -> ExecutionAdmissionDecision:
         if request.request_id is None:
             raise ValueError("request_id is required")
@@ -545,6 +708,8 @@ class DeterministicExecutionManagerCoordinator:
                 event_id for event_id in lifecycle_event_ids if event_id is not None
             ),
             reconciliation_marker_ids=reconciliation_marker_ids,
+            venue_validation_reason=venue_validation_reason,
+            venue_validation_details=venue_validation_details,
             decided_at=request.requested_at,
         )
 

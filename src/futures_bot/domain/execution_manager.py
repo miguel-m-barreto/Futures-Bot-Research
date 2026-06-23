@@ -30,6 +30,7 @@ from futures_bot.domain.order_lifecycle import (
 )
 from futures_bot.domain.runtime_control import OrderFlowPermission
 from futures_bot.domain.time import ensure_aware_utc
+from futures_bot.domain.venue_capabilities import VenueOrderValidationContext
 
 
 class ExecutionAdmissionRequestKind(StrEnum):
@@ -42,6 +43,9 @@ class ExecutionAdmissionDecisionReason(StrEnum):
     ACCEPTED = "ACCEPTED"
     REJECTED_BY_PERMISSION = "REJECTED_BY_PERMISSION"
     REJECTED_BY_VALIDATION = "REJECTED_BY_VALIDATION"
+    REJECTED_BY_VENUE_CAPABILITY = "REJECTED_BY_VENUE_CAPABILITY"
+    VENUE_CAPABILITY_CONTEXT_REQUIRED = "VENUE_CAPABILITY_CONTEXT_REQUIRED"
+    VENUE_CAPABILITY_CONTEXT_MISMATCH = "VENUE_CAPABILITY_CONTEXT_MISMATCH"
     TARGET_ORDER_NOT_FOUND = "TARGET_ORDER_NOT_FOUND"
     TARGET_ORDER_NOT_ACTIVE = "TARGET_ORDER_NOT_ACTIVE"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
@@ -69,6 +73,8 @@ class ExecutionAdmissionRequest(BaseModel):
     cancel_intent: CancelOrderIntent | None = None
     replace_intent: ReplaceOrderIntent | None = None
     order_flow_permission: OrderFlowPermission
+    venue_validation_context: VenueOrderValidationContext | None = None
+    require_venue_capability_validation: bool = False
     requested_at: datetime
     requested_by: str
     correlation_id: str | None = None
@@ -95,11 +101,22 @@ class ExecutionAdmissionRequest(BaseModel):
         if self.request_kind is ExecutionAdmissionRequestKind.ORDER_INTENT:
             if self.order_intent is None:
                 raise ValueError("ORDER_INTENT request requires order_intent")
+            if self.require_venue_capability_validation and self.venue_validation_context is None:
+                raise ValueError(
+                    "ORDER_INTENT with require_venue_capability_validation=True"
+                    " requires venue_validation_context"
+                )
         elif self.request_kind is ExecutionAdmissionRequestKind.CANCEL_INTENT:
             if self.cancel_intent is None:
                 raise ValueError("CANCEL_INTENT request requires cancel_intent")
-        elif self.replace_intent is None:
-            raise ValueError("REPLACE_INTENT request requires replace_intent")
+        else:
+            if self.replace_intent is None:
+                raise ValueError("REPLACE_INTENT request requires replace_intent")
+            if self.require_venue_capability_validation and self.venue_validation_context is None:
+                raise ValueError(
+                    "REPLACE_INTENT with require_venue_capability_validation=True"
+                    " requires venue_validation_context"
+                )
         expected = deterministic_execution_admission_request_id(self)
         if self.request_id is not None and self.request_id != expected:
             raise ValueError("request_id is not deterministic")
@@ -122,12 +139,21 @@ class ExecutionAdmissionDecision(BaseModel):
     record_id: ExecutionOrderRecordId | None = None
     lifecycle_event_ids: tuple[OrderLifecycleEventId, ...] = ()
     reconciliation_marker_ids: tuple[ExecutionReconciliationId, ...] = ()
+    venue_validation_reason: str | None = None
+    venue_validation_details: Any = None
     decided_at: datetime
 
     @field_validator("decided_at")
     @classmethod
     def _validate_decided_at(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
+
+    @field_validator("venue_validation_details")
+    @classmethod
+    def _validate_venue_validation_details(cls, value: Any) -> Any:
+        if value is not None:
+            _canonical_json_bytes(value)
+        return value
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
@@ -139,6 +165,13 @@ class ExecutionAdmissionDecision(BaseModel):
             raise ValueError("accepted decisions require ACCEPTED or IDEMPOTENT_REPLAY")
         if not self.accepted and self.reason in accepted_reasons:
             raise ValueError("rejected decisions require a non-accepted reason")
+        if (
+            self.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY
+            and self.venue_validation_reason is None
+        ):
+            raise ValueError(
+                "REJECTED_BY_VENUE_CAPABILITY decisions must include venue_validation_reason"
+            )
         expected = deterministic_execution_admission_decision_id(self)
         if self.decision_id is not None and self.decision_id != expected:
             raise ValueError("decision_id is not deterministic")

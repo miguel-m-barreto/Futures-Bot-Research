@@ -387,3 +387,15 @@ class ResyncPlanId(DomainId):
 
 class RuntimeDataHealthSnapshotId(DomainId):
     pass
+
+
+class ExecutionCapabilityCheckId(DomainId):
+    pass
+
+
+class ExecutionCapabilityDecisionId(DomainId):
+    pass
+
+
+class ExecutionCapabilityGateId(DomainId):
+    pass
