@@ -31,6 +31,7 @@ from futures_bot.domain.order_lifecycle import (
 from futures_bot.domain.runtime_control import OrderFlowPermission
 from futures_bot.domain.time import ensure_aware_utc
 from futures_bot.domain.venue_capabilities import VenueOrderValidationContext
+from futures_bot.domain.venue_capability_freshness import VenueCapabilityFreshnessCheck
 
 
 class ExecutionAdmissionRequestKind(StrEnum):
@@ -44,8 +45,11 @@ class ExecutionAdmissionDecisionReason(StrEnum):
     REJECTED_BY_PERMISSION = "REJECTED_BY_PERMISSION"
     REJECTED_BY_VALIDATION = "REJECTED_BY_VALIDATION"
     REJECTED_BY_VENUE_CAPABILITY = "REJECTED_BY_VENUE_CAPABILITY"
+    REJECTED_BY_CAPABILITY_FRESHNESS = "REJECTED_BY_CAPABILITY_FRESHNESS"
     VENUE_CAPABILITY_CONTEXT_REQUIRED = "VENUE_CAPABILITY_CONTEXT_REQUIRED"
     VENUE_CAPABILITY_CONTEXT_MISMATCH = "VENUE_CAPABILITY_CONTEXT_MISMATCH"
+    FRESHNESS_CONTEXT_REQUIRED = "FRESHNESS_CONTEXT_REQUIRED"
+    FRESHNESS_CONTEXT_MISMATCH = "FRESHNESS_CONTEXT_MISMATCH"
     TARGET_ORDER_NOT_FOUND = "TARGET_ORDER_NOT_FOUND"
     TARGET_ORDER_NOT_ACTIVE = "TARGET_ORDER_NOT_ACTIVE"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
@@ -74,7 +78,9 @@ class ExecutionAdmissionRequest(BaseModel):
     replace_intent: ReplaceOrderIntent | None = None
     order_flow_permission: OrderFlowPermission
     venue_validation_context: VenueOrderValidationContext | None = None
+    freshness_check: VenueCapabilityFreshnessCheck | None = None
     require_venue_capability_validation: bool = False
+    require_fresh_capability_snapshot: bool = False
     requested_at: datetime
     requested_by: str
     correlation_id: str | None = None
@@ -106,6 +112,15 @@ class ExecutionAdmissionRequest(BaseModel):
                     "ORDER_INTENT with require_venue_capability_validation=True"
                     " requires venue_validation_context"
                 )
+            if (
+                self.require_venue_capability_validation
+                and self.require_fresh_capability_snapshot
+                and self.freshness_check is None
+            ):
+                raise ValueError(
+                    "ORDER_INTENT with require_fresh_capability_snapshot=True"
+                    " requires freshness_check"
+                )
         elif self.request_kind is ExecutionAdmissionRequestKind.CANCEL_INTENT:
             if self.cancel_intent is None:
                 raise ValueError("CANCEL_INTENT request requires cancel_intent")
@@ -116,6 +131,15 @@ class ExecutionAdmissionRequest(BaseModel):
                 raise ValueError(
                     "REPLACE_INTENT with require_venue_capability_validation=True"
                     " requires venue_validation_context"
+                )
+            if (
+                self.require_venue_capability_validation
+                and self.require_fresh_capability_snapshot
+                and self.freshness_check is None
+            ):
+                raise ValueError(
+                    "REPLACE_INTENT with require_fresh_capability_snapshot=True"
+                    " requires freshness_check"
                 )
         expected = deterministic_execution_admission_request_id(self)
         if self.request_id is not None and self.request_id != expected:
@@ -141,6 +165,9 @@ class ExecutionAdmissionDecision(BaseModel):
     reconciliation_marker_ids: tuple[ExecutionReconciliationId, ...] = ()
     venue_validation_reason: str | None = None
     venue_validation_details: Any = None
+    freshness_reason: str | None = None
+    freshness_details: Any = None
+    freshness_checked: bool = False
     decided_at: datetime
 
     @field_validator("decided_at")
@@ -148,7 +175,7 @@ class ExecutionAdmissionDecision(BaseModel):
     def _validate_decided_at(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
 
-    @field_validator("venue_validation_details")
+    @field_validator("venue_validation_details", "freshness_details")
     @classmethod
     def _validate_venue_validation_details(cls, value: Any) -> Any:
         if value is not None:
@@ -171,6 +198,13 @@ class ExecutionAdmissionDecision(BaseModel):
         ):
             raise ValueError(
                 "REJECTED_BY_VENUE_CAPABILITY decisions must include venue_validation_reason"
+            )
+        if (
+            self.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_CAPABILITY_FRESHNESS
+            and self.freshness_reason is None
+        ):
+            raise ValueError(
+                "REJECTED_BY_CAPABILITY_FRESHNESS decisions must include freshness_reason"
             )
         expected = deterministic_execution_admission_decision_id(self)
         if self.decision_id is not None and self.decision_id != expected:

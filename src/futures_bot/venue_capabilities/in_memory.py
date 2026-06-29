@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from futures_bot.domain.ids import VenueCapabilityFreshnessDecisionId
 from futures_bot.domain.venue_capabilities import (
     VenueCapabilitySnapshot,
     VenueInstrumentRuleSnapshot,
 )
+from futures_bot.domain.venue_capability_freshness import VenueCapabilityFreshnessDecision
 
 
 class InMemoryVenueCapabilitySnapshotStore:
@@ -59,3 +61,30 @@ class InMemoryVenueInstrumentRuleSnapshotStore:
         if not snapshots:
             return None
         return max(snapshots, key=lambda item: (item.captured_at, str(item.snapshot_id)))
+
+
+class InMemoryVenueCapabilityFreshnessDecisionStore:
+    """Deterministic idempotent freshness decision store test double."""
+
+    def __init__(self) -> None:
+        self._decisions_by_id: dict[str, VenueCapabilityFreshnessDecision] = {}
+        self._append_order: list[str] = []
+
+    def put(self, decision: VenueCapabilityFreshnessDecision) -> None:
+        key = str(decision.decision_id)
+        existing = self._decisions_by_id.get(key)
+        if existing is not None:
+            if existing != decision:
+                raise ValueError("venue capability freshness decision id collision")
+            return
+        self._decisions_by_id[key] = decision
+        self._append_order.append(key)
+
+    def get(
+        self,
+        decision_id: VenueCapabilityFreshnessDecisionId,
+    ) -> VenueCapabilityFreshnessDecision | None:
+        return self._decisions_by_id.get(str(decision_id))
+
+    def list_decisions(self) -> tuple[VenueCapabilityFreshnessDecision, ...]:
+        return tuple(self._decisions_by_id[key] for key in self._append_order)

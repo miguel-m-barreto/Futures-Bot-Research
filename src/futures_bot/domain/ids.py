@@ -169,6 +169,22 @@ class DeadManSwitchCapabilityId(DomainId):
     pass
 
 
+class VenueCapabilityFreshnessPolicyId(DomainId):
+    pass
+
+
+class VenueCapabilityFreshnessCheckId(DomainId):
+    pass
+
+
+class VenueCapabilityFreshnessDecisionId(DomainId):
+    pass
+
+
+class VenueCapabilityReadinessSnapshotId(DomainId):
+    pass
+
+
 class ExchangeOrderId(DomainId):
     pass
 

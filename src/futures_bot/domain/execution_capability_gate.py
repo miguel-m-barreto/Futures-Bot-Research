@@ -20,12 +20,16 @@ from futures_bot.domain.ids import (
 from futures_bot.domain.order_lifecycle import OrderIntent
 from futures_bot.domain.time import ensure_aware_utc
 from futures_bot.domain.venue_capabilities import VenueOrderValidationContext
+from futures_bot.domain.venue_capability_freshness import VenueCapabilityFreshnessCheck
 
 
 class ExecutionCapabilityDecisionReason(StrEnum):
     EXECUTABLE = "EXECUTABLE"
     REJECTED_BY_VENUE_CAPABILITY = "REJECTED_BY_VENUE_CAPABILITY"
     VALIDATION_CONTEXT_MISMATCH = "VALIDATION_CONTEXT_MISMATCH"
+    REJECTED_BY_CAPABILITY_FRESHNESS = "REJECTED_BY_CAPABILITY_FRESHNESS"
+    FRESHNESS_CONTEXT_REQUIRED = "FRESHNESS_CONTEXT_REQUIRED"
+    FRESHNESS_CONTEXT_MISMATCH = "FRESHNESS_CONTEXT_MISMATCH"
 
 
 class ExecutionCapabilityCheck(BaseModel):
@@ -34,6 +38,8 @@ class ExecutionCapabilityCheck(BaseModel):
     check_id: ExecutionCapabilityCheckId | None = None
     order_intent: OrderIntent
     venue_validation_context: VenueOrderValidationContext
+    freshness_check: VenueCapabilityFreshnessCheck | None = None
+    require_fresh_capability_snapshot: bool = False
     requested_at: datetime
     requested_by: str
     correlation_id: str | None = None
@@ -52,6 +58,25 @@ class ExecutionCapabilityCheck(BaseModel):
     def _validate_invariants(self) -> Self:
         if self.venue_validation_context.order_intent != self.order_intent:
             raise ValueError("venue_validation_context.order_intent must match order_intent")
+        if self.require_fresh_capability_snapshot:
+            if self.freshness_check is None:
+                raise ValueError(
+                    "require_fresh_capability_snapshot=True requires freshness_check"
+                )
+            if self.freshness_check.venue_id != self.order_intent.venue_id:
+                raise ValueError("freshness_check.venue_id must match order_intent")
+            if self.freshness_check.instrument_id != self.order_intent.instrument_id:
+                raise ValueError("freshness_check.instrument_id must match order_intent")
+            if (
+                self.freshness_check.venue_snapshot
+                != self.venue_validation_context.venue_snapshot
+            ):
+                raise ValueError("freshness_check.venue_snapshot must match context")
+            if (
+                self.freshness_check.instrument_rules
+                != self.venue_validation_context.instrument_rules
+            ):
+                raise ValueError("freshness_check.instrument_rules must match context")
         expected = deterministic_execution_capability_check_id(self)
         if self.check_id is not None and self.check_id != expected:
             raise ValueError("check_id is not deterministic")
@@ -70,6 +95,9 @@ class ExecutionCapabilityDecision(BaseModel):
     reason: ExecutionCapabilityDecisionReason
     venue_validation_reason: str | None = None
     venue_validation_details: Any = None
+    freshness_reason: str | None = None
+    freshness_details: Any = None
+    freshness_checked: bool = False
     decided_at: datetime
 
     @field_validator("decided_at")
@@ -77,7 +105,7 @@ class ExecutionCapabilityDecision(BaseModel):
     def _validate_decided_at(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
 
-    @field_validator("venue_validation_details")
+    @field_validator("venue_validation_details", "freshness_details")
     @classmethod
     def _validate_details(cls, value: Any) -> Any:
         if value is not None:

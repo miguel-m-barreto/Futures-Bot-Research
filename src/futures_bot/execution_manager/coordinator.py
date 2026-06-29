@@ -6,7 +6,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from futures_bot.domain.execution_capability_gate import ExecutionCapabilityCheck
+from futures_bot.domain.execution_capability_gate import (
+    ExecutionCapabilityCheck,
+    ExecutionCapabilityDecision,
+    ExecutionCapabilityDecisionReason,
+)
 from futures_bot.domain.execution_manager import (
     ExecutionAdmissionDecision,
     ExecutionAdmissionDecisionReason,
@@ -33,6 +37,8 @@ from futures_bot.domain.order_lifecycle import (
     canonical_payload_hash,
 )
 from futures_bot.domain.runtime_control import RuntimeDataScopeKind
+from futures_bot.domain.venue_capabilities import VenueOrderValidationContext
+from futures_bot.domain.venue_capability_freshness import VenueCapabilityFreshnessCheck
 from futures_bot.execution_manager.capability_gate import DeterministicExecutionCapabilityGate
 from futures_bot.order_lifecycle.policies import (
     evaluate_cancel_intent_permission,
@@ -163,6 +169,9 @@ class DeterministicExecutionManagerCoordinator:
 
         accepted_venue_reason: str | None = None
         accepted_venue_details: Any = None
+        accepted_freshness_reason: str | None = None
+        accepted_freshness_details: Any = None
+        freshness_checked = False
 
         if request.require_venue_capability_validation:
             ctx = request.venue_validation_context
@@ -198,15 +207,69 @@ class DeterministicExecutionManagerCoordinator:
                     venue_validation_reason="VALIDATION_CONTEXT_MISMATCH",
                     venue_validation_details={"message": "order_intent mismatch with context"},
                 )
+            if request.require_fresh_capability_snapshot and request.freshness_check is None:
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_REQUIRED,
+                    order_intent_id=order_intent.intent_id,
+                    client_order_id=order_intent.client_order_id,
+                    lifecycle_event_ids=(created_event.event_id,),
+                    freshness_checked=False,
+                )
+            if (
+                request.require_fresh_capability_snapshot
+                and request.freshness_check is not None
+                and not _freshness_context_matches_request(
+                    order_intent=order_intent,
+                    venue_validation_context=ctx,
+                    freshness_check=request.freshness_check,
+                )
+            ):
+                freshness_details = _freshness_context_mismatch_details(
+                    order_intent=order_intent,
+                    venue_validation_context=ctx,
+                    freshness_check=request.freshness_check,
+                )
+                rejected_event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "request_id": str(request.request_id),
+                        "order_intent_id": str(order_intent.intent_id),
+                        "client_order_id": str(order_intent.client_order_id),
+                        "freshness_reason": "FRESHNESS_CONTEXT_MISMATCH",
+                        "freshness_details": freshness_details,
+                        "stage": "rejected_by_capability_freshness_context",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_MISMATCH,
+                    order_intent_id=order_intent.intent_id,
+                    client_order_id=order_intent.client_order_id,
+                    lifecycle_event_ids=(created_event.event_id, rejected_event.event_id),
+                    freshness_reason="FRESHNESS_CONTEXT_MISMATCH",
+                    freshness_details=freshness_details,
+                    freshness_checked=False,
+                )
             check = ExecutionCapabilityCheck(
                 order_intent=order_intent,
                 venue_validation_context=ctx,
+                freshness_check=request.freshness_check,
+                require_fresh_capability_snapshot=request.require_fresh_capability_snapshot,
                 requested_at=request.requested_at,
                 requested_by=request.requested_by,
                 correlation_id=request.correlation_id,
             )
             gate_decision = self._capability_gate.check(check)
             if not gate_decision.executable:
+                admission_reason = _admission_reason_for_gate(gate_decision)
                 rejected_event = self._append_lifecycle_event(
                     request=request,
                     order_intent=order_intent,
@@ -220,21 +283,29 @@ class DeterministicExecutionManagerCoordinator:
                         "client_order_id": str(order_intent.client_order_id),
                         "venue_validation_reason": gate_decision.venue_validation_reason,
                         "venue_validation_details": gate_decision.venue_validation_details,
+                        "freshness_reason": gate_decision.freshness_reason,
+                        "freshness_details": gate_decision.freshness_details,
                         "stage": "rejected_by_venue_capability",
                     },
                 )
                 return self._decision(
                     request=request,
                     accepted=False,
-                    reason=ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY,
+                    reason=admission_reason,
                     order_intent_id=order_intent.intent_id,
                     client_order_id=order_intent.client_order_id,
                     lifecycle_event_ids=(created_event.event_id, rejected_event.event_id),
                     venue_validation_reason=gate_decision.venue_validation_reason,
                     venue_validation_details=gate_decision.venue_validation_details,
+                    freshness_reason=gate_decision.freshness_reason,
+                    freshness_details=gate_decision.freshness_details,
+                    freshness_checked=gate_decision.freshness_checked,
                 )
             accepted_venue_reason = gate_decision.venue_validation_reason
             accepted_venue_details = gate_decision.venue_validation_details
+            accepted_freshness_reason = gate_decision.freshness_reason
+            accepted_freshness_details = gate_decision.freshness_details
+            freshness_checked = gate_decision.freshness_checked
 
         self._intent_journal.append_order_intent(order_intent)
         record_id = deterministic_execution_order_record_id(order_intent)
@@ -265,6 +336,9 @@ class DeterministicExecutionManagerCoordinator:
             lifecycle_event_ids=(created_event.event_id, accepted_event.event_id),
             venue_validation_reason=accepted_venue_reason,
             venue_validation_details=accepted_venue_details,
+            freshness_reason=accepted_freshness_reason,
+            freshness_details=accepted_freshness_details,
+            freshness_checked=freshness_checked,
         )
 
     def _admit_cancel_intent(
@@ -429,6 +503,9 @@ class DeterministicExecutionManagerCoordinator:
 
         accepted_venue_reason: str | None = None
         accepted_venue_details: Any = None
+        accepted_freshness_reason: str | None = None
+        accepted_freshness_details: Any = None
+        freshness_checked = False
 
         if request.require_venue_capability_validation:
             ctx = request.venue_validation_context
@@ -465,15 +542,70 @@ class DeterministicExecutionManagerCoordinator:
                     venue_validation_reason="VALIDATION_CONTEXT_MISMATCH",
                     venue_validation_details={"message": "order_intent mismatch with context"},
                 )
+            if request.require_fresh_capability_snapshot and request.freshness_check is None:
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_REQUIRED,
+                    replace_intent_id=replace_intent.replace_intent_id,
+                    client_order_id=target.client_order_id,
+                    record_id=target.record_id,
+                    freshness_checked=False,
+                )
+            if (
+                request.require_fresh_capability_snapshot
+                and request.freshness_check is not None
+                and not _freshness_context_matches_request(
+                    order_intent=replacement,
+                    venue_validation_context=ctx,
+                    freshness_check=request.freshness_check,
+                )
+            ):
+                freshness_details = _freshness_context_mismatch_details(
+                    order_intent=replacement,
+                    venue_validation_context=ctx,
+                    freshness_check=request.freshness_check,
+                )
+                rejected_event = self._append_lifecycle_event(
+                    request=request,
+                    order_intent=target.order_intent,
+                    event_kind=OrderLifecycleEventKind.REJECTED_BY_VALIDATION,
+                    previous_state=OrderLifecycleState.CREATED,
+                    next_state=OrderLifecycleState.REJECTED_BY_VALIDATION,
+                    record_id=None,
+                    payload={
+                        "replace_intent_id": str(replace_intent.replace_intent_id),
+                        "order_intent_id": str(replacement.intent_id),
+                        "client_order_id": str(replacement.client_order_id),
+                        "freshness_reason": "FRESHNESS_CONTEXT_MISMATCH",
+                        "freshness_details": freshness_details,
+                        "stage": "rejected_by_capability_freshness_context",
+                    },
+                )
+                return self._decision(
+                    request=request,
+                    accepted=False,
+                    reason=ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_MISMATCH,
+                    replace_intent_id=replace_intent.replace_intent_id,
+                    client_order_id=target.client_order_id,
+                    record_id=target.record_id,
+                    lifecycle_event_ids=(rejected_event.event_id,),
+                    freshness_reason="FRESHNESS_CONTEXT_MISMATCH",
+                    freshness_details=freshness_details,
+                    freshness_checked=False,
+                )
             check = ExecutionCapabilityCheck(
                 order_intent=replacement,
                 venue_validation_context=ctx,
+                freshness_check=request.freshness_check,
+                require_fresh_capability_snapshot=request.require_fresh_capability_snapshot,
                 requested_at=request.requested_at,
                 requested_by=request.requested_by,
                 correlation_id=request.correlation_id,
             )
             gate_decision = self._capability_gate.check(check)
             if not gate_decision.executable:
+                admission_reason = _admission_reason_for_gate(gate_decision)
                 rejected_event = self._append_lifecycle_event(
                     request=request,
                     order_intent=target.order_intent,
@@ -487,22 +619,30 @@ class DeterministicExecutionManagerCoordinator:
                         "client_order_id": str(replacement.client_order_id),
                         "venue_validation_reason": gate_decision.venue_validation_reason,
                         "venue_validation_details": gate_decision.venue_validation_details,
+                        "freshness_reason": gate_decision.freshness_reason,
+                        "freshness_details": gate_decision.freshness_details,
                         "stage": "rejected_by_venue_capability",
                     },
                 )
                 return self._decision(
                     request=request,
                     accepted=False,
-                    reason=ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY,
+                    reason=admission_reason,
                     replace_intent_id=replace_intent.replace_intent_id,
                     client_order_id=target.client_order_id,
                     record_id=target.record_id,
                     lifecycle_event_ids=(rejected_event.event_id,),
                     venue_validation_reason=gate_decision.venue_validation_reason,
                     venue_validation_details=gate_decision.venue_validation_details,
+                    freshness_reason=gate_decision.freshness_reason,
+                    freshness_details=gate_decision.freshness_details,
+                    freshness_checked=gate_decision.freshness_checked,
                 )
             accepted_venue_reason = gate_decision.venue_validation_reason
             accepted_venue_details = gate_decision.venue_validation_details
+            accepted_freshness_reason = gate_decision.freshness_reason
+            accepted_freshness_details = gate_decision.freshness_details
+            freshness_checked = gate_decision.freshness_checked
 
         self._intent_journal.append_replace_intent(replace_intent)
         target_event = self._append_lifecycle_event(
@@ -553,6 +693,9 @@ class DeterministicExecutionManagerCoordinator:
             lifecycle_event_ids=(target_event.event_id, replacement_event.event_id),
             venue_validation_reason=accepted_venue_reason,
             venue_validation_details=accepted_venue_details,
+            freshness_reason=accepted_freshness_reason,
+            freshness_details=accepted_freshness_details,
+            freshness_checked=freshness_checked,
         )
 
     def _append_lifecycle_event(  # noqa: PLR0913
@@ -691,6 +834,9 @@ class DeterministicExecutionManagerCoordinator:
         reconciliation_marker_ids: tuple[ExecutionReconciliationId, ...] = (),
         venue_validation_reason: str | None = None,
         venue_validation_details: Any = None,
+        freshness_reason: str | None = None,
+        freshness_details: Any = None,
+        freshness_checked: bool = False,
     ) -> ExecutionAdmissionDecision:
         if request.request_id is None:
             raise ValueError("request_id is required")
@@ -710,6 +856,9 @@ class DeterministicExecutionManagerCoordinator:
             reconciliation_marker_ids=reconciliation_marker_ids,
             venue_validation_reason=venue_validation_reason,
             venue_validation_details=venue_validation_details,
+            freshness_reason=freshness_reason,
+            freshness_details=freshness_details,
+            freshness_checked=freshness_checked,
             decided_at=request.requested_at,
         )
 
@@ -739,6 +888,55 @@ def deterministic_reconciliation_id(
 
 def _is_entry_record(record: ExecutionOrderRecord | None) -> bool:
     return record is not None and record.order_intent.intent_kind is OrderIntentKind.ENTRY
+
+
+def _admission_reason_for_gate(
+    decision: ExecutionCapabilityDecision,
+) -> ExecutionAdmissionDecisionReason:
+    if decision.reason is ExecutionCapabilityDecisionReason.REJECTED_BY_CAPABILITY_FRESHNESS:
+        return ExecutionAdmissionDecisionReason.REJECTED_BY_CAPABILITY_FRESHNESS
+    if decision.reason is ExecutionCapabilityDecisionReason.FRESHNESS_CONTEXT_REQUIRED:
+        return ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_REQUIRED
+    if decision.reason is ExecutionCapabilityDecisionReason.FRESHNESS_CONTEXT_MISMATCH:
+        return ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_MISMATCH
+    if decision.reason is ExecutionCapabilityDecisionReason.VALIDATION_CONTEXT_MISMATCH:
+        return ExecutionAdmissionDecisionReason.VENUE_CAPABILITY_CONTEXT_MISMATCH
+    return ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY
+
+
+def _freshness_context_matches_request(
+    *,
+    order_intent: OrderIntent,
+    venue_validation_context: VenueOrderValidationContext,
+    freshness_check: VenueCapabilityFreshnessCheck,
+) -> bool:
+    return (
+        freshness_check.venue_id == order_intent.venue_id
+        and freshness_check.instrument_id == order_intent.instrument_id
+        and freshness_check.venue_snapshot == venue_validation_context.venue_snapshot
+        and freshness_check.instrument_rules == venue_validation_context.instrument_rules
+    )
+
+
+def _freshness_context_mismatch_details(
+    *,
+    order_intent: OrderIntent,
+    venue_validation_context: VenueOrderValidationContext,
+    freshness_check: VenueCapabilityFreshnessCheck,
+) -> dict[str, Any]:
+    mismatches: list[str] = []
+    if freshness_check.venue_id != order_intent.venue_id:
+        mismatches.append("venue_id")
+    if freshness_check.instrument_id != order_intent.instrument_id:
+        mismatches.append("instrument_id")
+    if freshness_check.venue_snapshot != venue_validation_context.venue_snapshot:
+        mismatches.append("venue_snapshot")
+    if freshness_check.instrument_rules != venue_validation_context.instrument_rules:
+        mismatches.append("instrument_rules")
+    return {
+        "message": "freshness_check must match order intent and venue validation context",
+        "mismatch": ",".join(mismatches),
+    }
 
 
 def replacement_scope_matches_target(

@@ -1318,7 +1318,10 @@ def test_execution_manager_ports_do_not_import_infrastructure() -> None:
 def test_venue_capability_sources_do_not_use_external_infra_or_runtime_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/venue_capabilities.py",
+        ROOT / "src/futures_bot/domain/venue_capability_freshness.py",
         ROOT / "src/futures_bot/ports/venue_capabilities.py",
+        ROOT / "src/futures_bot/ports/venue_capability_freshness.py",
+        ROOT / "src/futures_bot/venue_capabilities/freshness.py",
         ROOT / "src/futures_bot/venue_capabilities/in_memory.py",
         ROOT / "src/futures_bot/venue_capabilities/validator.py",
     )
@@ -1424,8 +1427,12 @@ def test_execution_capability_gate_test_files_do_not_import_forbidden_dependenci
     gate_test_files = (
         ROOT / "tests/unit/test_execution_capability_gate_domain.py",
         ROOT / "tests/unit/test_execution_capability_gate.py",
+        ROOT / "tests/unit/test_execution_capability_gate_freshness.py",
         ROOT / "tests/unit/test_execution_manager_capability_integration.py",
+        ROOT / "tests/unit/test_execution_manager_capability_freshness_integration.py",
         ROOT / "tests/unit/test_execution_manager_replace_capability_integration.py",
+        ROOT / "tests/unit/test_venue_capability_freshness_domain.py",
+        ROOT / "tests/unit/test_venue_capability_freshness_policy.py",
     )
     forbidden = (
         "sqlalchemy",
