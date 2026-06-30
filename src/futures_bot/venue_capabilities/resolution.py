@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from futures_bot.domain.ids import VenueCapabilitySourceRecordId
 from futures_bot.domain.venue_capabilities import (
     VenueCapabilitySnapshot,
     VenueInstrumentRuleSnapshot,
@@ -138,6 +139,12 @@ class DeterministicVenueCapabilityResolutionGateway:
             freshness_check=freshness_check,
             freshness_decision=freshness_decision,
             venue_validation_context=venue_validation_context,
+            venue_source_record_id=venue_snapshot.source_record_id,
+            instrument_source_record_ids=(
+                (instrument_rules.source_record_id,)
+                if instrument_rules.source_record_id is not None
+                else ()
+            ),
             details={
                 "venue_snapshot_id": str(venue_snapshot.snapshot_id),
                 "instrument_rule_snapshot_id": str(instrument_rules.snapshot_id),
@@ -157,6 +164,8 @@ def _decision(  # noqa: PLR0913
     freshness_check: VenueCapabilityFreshnessCheck | None = None,
     freshness_decision: VenueCapabilityFreshnessDecision | None = None,
     venue_validation_context: VenueOrderValidationContext | None = None,
+    venue_source_record_id: VenueCapabilitySourceRecordId | None = None,
+    instrument_source_record_ids: tuple[VenueCapabilitySourceRecordId, ...] = (),
 ) -> VenueCapabilityResolutionDecision:
     if request.request_id is None:
         raise ValueError("request_id is required")
@@ -169,6 +178,8 @@ def _decision(  # noqa: PLR0913
         freshness_check=freshness_check,
         freshness_decision=freshness_decision,
         venue_validation_context=venue_validation_context,
+        venue_source_record_id=venue_source_record_id,
+        instrument_source_record_ids=instrument_source_record_ids,
         checked_at=request.checked_at,
         details=details,
     )

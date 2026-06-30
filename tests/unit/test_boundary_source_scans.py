@@ -1471,3 +1471,59 @@ def test_execution_capability_gate_test_files_do_not_import_forbidden_dependenci
             assert not any(name in line for line in lines), (
                 f"found {name!r} import in {path.name}"
             )
+
+
+def test_venue_capability_source_contracts_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/venue_capability_sources.py",
+        ROOT / "src/futures_bot/ports/venue_capability_sources.py",
+        ROOT / "src/futures_bot/venue_capabilities/sources.py",
+        ROOT / "src/futures_bot/venue_capabilities/in_memory.py",
+        ROOT / "src/futures_bot/domain/venue_capabilities.py",
+        ROOT / "src/futures_bot/domain/venue_capability_resolution.py",
+        ROOT / "src/futures_bot/venue_capabilities/resolution.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "Binance",
+        "KuCoin",
+        "CoinEx",
+        "MEXC",
+        "Phemex",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+        "BotBlueprint",
+        "BotInstance",
+        "Ledger",
+        "open(",
+        "write_text",
+        "read_text",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_venue_capability_source_ports_do_not_import_infrastructure() -> None:
+    lines = _import_lines(ROOT / "src/futures_bot/ports/venue_capability_sources.py")
+    assert not any("infrastructure" in line for line in lines)

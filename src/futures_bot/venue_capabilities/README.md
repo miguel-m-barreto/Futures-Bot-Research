@@ -36,9 +36,33 @@ and portfolio-margin assumptions are intentionally outside this contract.
 Dead-man switch, rate-limit, self-trade-prevention, and price-protection capabilities
 are modeled as deterministic contracts, but no live runtime enforcement is added here.
 
+Official capability sources are provenance only. A source descriptor records where a
+venue capability payload claims to come from, how it may eventually be fetched, its
+trust classification, and reference metadata. Reference URIs are never fetched by
+these contracts.
+
+Source payloads are canonical JSON-compatible values with deterministic SHA-256
+hashes. Source records capture a descriptor, payload, health status, acceptance
+reason, and recorded time. They are factual audit records; they are not alpha,
+strategy logic, profitability filtering, or risk scoring. Unknown, untrusted, or
+test-only sources cannot be silently accepted for execution provenance.
+
+Manual official imports are deterministic contracts for reviewed snapshots. A manual
+import requires an accepted official source record and rejects venue or instrument
+snapshots whose venue, source record ID, or source payload hash do not match that
+record.
+
+Venue capability snapshots and instrument rule snapshots can carry optional
+`source_record_id` and `source_payload_hash` fields. The fields are backward
+compatible and optional for existing snapshots, but when one is present the other
+must be present too.
+
 Passing freshness and capability validation is still local acceptance only. It is
 not real venue submission.
 
-Official exchange ingestion and real adapters remain deferred. This package
-performs no network calls, filesystem persistence, database writes, order
-submission, cancel, replace, or simulation.
+Official exchange ingestion and real adapters remain deferred. Endpoint mapping,
+venue-specific payload schemas, source TTLs, manual review workflow, persistent
+provenance stores, database schemas, runtime ingestion loops, and adapter-specific
+source health models require human review before implementation. This package
+performs no network calls, API polling, filesystem persistence, database writes,
+order submission, cancel, replace, or simulation.

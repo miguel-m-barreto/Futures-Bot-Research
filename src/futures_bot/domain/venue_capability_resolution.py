@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from futures_bot.domain.ids import (
     VenueCapabilityResolutionDecisionId,
     VenueCapabilityResolutionRequestId,
+    VenueCapabilitySourceRecordId,
 )
 from futures_bot.domain.order_lifecycle import OrderIntent
 from futures_bot.domain.time import ensure_aware_utc
@@ -81,6 +82,8 @@ class VenueCapabilityResolutionDecision(BaseModel):
     freshness_check: VenueCapabilityFreshnessCheck | None = None
     freshness_decision: VenueCapabilityFreshnessDecision | None = None
     venue_validation_context: VenueOrderValidationContext | None = None
+    venue_source_record_id: VenueCapabilitySourceRecordId | None = None
+    instrument_source_record_ids: tuple[VenueCapabilitySourceRecordId, ...] = ()
     checked_at: datetime
     details: Any
 

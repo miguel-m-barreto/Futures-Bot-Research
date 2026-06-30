@@ -185,6 +185,26 @@ class VenueCapabilityReadinessSnapshotId(DomainId):
     pass
 
 
+class VenueCapabilitySourceId(DomainId):
+    pass
+
+
+class VenueCapabilitySourceRecordId(DomainId):
+    pass
+
+
+class VenueCapabilitySourcePayloadHashId(DomainId):
+    pass
+
+
+class VenueCapabilitySourceImportId(DomainId):
+    pass
+
+
+class VenueCapabilitySourceHealthRecordId(DomainId):
+    pass
+
+
 class VenueCapabilityResolutionRequestId(DomainId):
     pass
 

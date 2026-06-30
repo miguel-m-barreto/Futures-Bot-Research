@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from futures_bot.domain.ids import (
     DeadManSwitchCapabilityId,
     VenueCapabilitySnapshotId,
+    VenueCapabilitySourceRecordId,
     VenueInstrumentRuleSnapshotId,
     VenueOrderValidationId,
     VenueRateLimitProfileId,
@@ -295,6 +296,8 @@ class VenueCapabilitySnapshot(BaseModel):
     dead_man_switch: DeadManSwitchCapability
     rate_limit_profile: VenueRateLimitProfile | None = None
     source_hash: str | None = None
+    source_record_id: VenueCapabilitySourceRecordId | None = None
+    source_payload_hash: str | None = None
 
     @field_validator("venue_id", "account_tier")
     @classmethod
@@ -317,15 +320,19 @@ class VenueCapabilitySnapshot(BaseModel):
                 raise ValueError("supported assets must be limited to USDT/USDC")
         return value
 
-    @field_validator("source_hash")
+    @field_validator("source_hash", "source_payload_hash")
     @classmethod
     def _validate_hash(cls, value: str | None) -> str | None:
-        return None if value is None else _sha256_hex(value, "source_hash")
+        return None if value is None else _sha256_hex(value, "source hash")
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
         if self.supports_gtd and self.min_gtd_duration_ms is not None:
             _validate_positive_optional_int(self.min_gtd_duration_ms, "min_gtd_duration_ms")
+        if (self.source_record_id is None) != (self.source_payload_hash is None):
+            raise ValueError(
+                "source_record_id and source_payload_hash must be present together"
+            )
         return self
 
 
@@ -357,6 +364,8 @@ class VenueInstrumentRuleSnapshot(BaseModel):
     supports_price_protection: bool
     supported_self_trade_prevention_modes: tuple[VenueSelfTradePreventionMode, ...]
     source_hash: str | None = None
+    source_record_id: VenueCapabilitySourceRecordId | None = None
+    source_payload_hash: str | None = None
 
     @field_validator(
         "venue_id",
@@ -381,10 +390,10 @@ class VenueInstrumentRuleSnapshot(BaseModel):
     def _coerce_max_leverage(cls, value: object) -> Decimal | None:
         return None if value is None else _coerce_decimal(value)
 
-    @field_validator("source_hash")
+    @field_validator("source_hash", "source_payload_hash")
     @classmethod
     def _validate_hash(cls, value: str | None) -> str | None:
-        return None if value is None else _sha256_hex(value, "source_hash")
+        return None if value is None else _sha256_hex(value, "source hash")
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
@@ -394,6 +403,10 @@ class VenueInstrumentRuleSnapshot(BaseModel):
             raise ValueError("supported_order_types must be non-empty")
         if self.supports_gtd and self.min_gtd_duration_ms is not None:
             _validate_positive_optional_int(self.min_gtd_duration_ms, "min_gtd_duration_ms")
+        if (self.source_record_id is None) != (self.source_payload_hash is None):
+            raise ValueError(
+                "source_record_id and source_payload_hash must be present together"
+            )
         return self
 
 
