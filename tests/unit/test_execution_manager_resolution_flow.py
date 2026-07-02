@@ -34,6 +34,16 @@ from futures_bot.domain.venue_capability_resolution import (
     VenueCapabilityResolutionReason,
     VenueCapabilityResolutionRequest,
 )
+from futures_bot.domain.venue_capability_sources import (
+    VenueCapabilitySourceDescriptor,
+    VenueCapabilitySourceFetchMode,
+    VenueCapabilitySourceHealthStatus,
+    VenueCapabilitySourceKind,
+    VenueCapabilitySourcePayload,
+    VenueCapabilitySourceRecord,
+    VenueCapabilitySourceRecordReason,
+    VenueCapabilitySourceTrust,
+)
 from futures_bot.execution_manager.coordinator import DeterministicExecutionManagerCoordinator
 from futures_bot.order_lifecycle.in_memory import (
     InMemoryExecutionOrderRecordStore,
@@ -43,6 +53,7 @@ from futures_bot.order_lifecycle.in_memory import (
 )
 from futures_bot.venue_capabilities.in_memory import (
     InMemoryVenueCapabilitySnapshotStore,
+    InMemoryVenueCapabilitySourceRecordStore,
     InMemoryVenueInstrumentRuleSnapshotStore,
 )
 from futures_bot.venue_capabilities.resolution import (
@@ -72,12 +83,43 @@ def _coordinator() -> tuple[
     return coordinator, records
 
 
-def _resolve(
+def _source_record() -> VenueCapabilitySourceRecord:
+    descriptor = VenueCapabilitySourceDescriptor(
+        venue_id="venue-1",
+        source_kind=VenueCapabilitySourceKind.OFFICIAL_EXCHANGE_EXPORT,
+        trust=VenueCapabilitySourceTrust.OFFICIAL,
+        fetch_mode=VenueCapabilitySourceFetchMode.MANUAL,
+        reference_name="Official export",
+        official_owner="Venue",
+        version="2026-01-01",
+        created_at=NOW,
+        metadata={},
+    )
+    payload = VenueCapabilitySourcePayload(
+        canonical_payload={"venue": "venue-1", "symbols": ["BTCUSDT"]},
+        content_type="application/json",
+        captured_at=NOW,
+        observed_at=NOW,
+    )
+    return VenueCapabilitySourceRecord(
+        descriptor=descriptor,
+        payload=payload,
+        health_status=VenueCapabilitySourceHealthStatus.HEALTHY,
+        reason=VenueCapabilitySourceRecordReason.ACCEPTED,
+        accepted_for_execution=True,
+        recorded_at=NOW,
+        details={},
+    )
+
+
+def _resolve(  # noqa: PLR0913
     *,
     order_intent: OrderIntent,
     venue_snapshot: VenueCapabilitySnapshot | None = None,
     instrument_rules: VenueInstrumentRuleSnapshot | None = None,
     policy: VenueCapabilityFreshnessPolicy | None = None,
+    source_record_store: InMemoryVenueCapabilitySourceRecordStore | None = None,
+    require_official_source_provenance: bool = False,
 ) -> VenueCapabilityResolutionDecision:
     venue_store = InMemoryVenueCapabilitySnapshotStore()
     rule_store = InMemoryVenueInstrumentRuleSnapshotStore()
@@ -88,6 +130,7 @@ def _resolve(
     gateway = DeterministicVenueCapabilityResolutionGateway(
         venue_snapshot_store=venue_store,
         instrument_rule_store=rule_store,
+        source_record_store=source_record_store,
     )
     return gateway.resolve(
         VenueCapabilityResolutionRequest(
@@ -95,6 +138,7 @@ def _resolve(
             checked_at=NOW,
             freshness_policy=policy or _policy(),
             source_health=CapabilitySourceHealth.HEALTHY,
+            require_official_source_provenance=require_official_source_provenance,
         )
     )
 
@@ -132,12 +176,55 @@ def test_ready_resolution_feeds_admission_and_accepts_local_order() -> None:
     assert records.get_by_client_order_id(order_intent.client_order_id) is not None
 
 
+def test_provenance_ready_resolution_feeds_admission_and_accepts_local_order() -> None:
+    source_record = _source_record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    source_store = InMemoryVenueCapabilitySourceRecordStore()
+    source_store.put(source_record)
+    order_intent = order()
+    decision = _resolve(
+        order_intent=order_intent,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        instrument_rules=rules(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        source_record_store=source_store,
+        require_official_source_provenance=True,
+    )
+    assert decision.ready is True
+    assert decision.provenance_checked is True
+    coordinator, records = _coordinator()
+    admission = coordinator.admit(_request_from_resolution(decision))
+    assert admission.accepted is True
+    assert admission.reason is ExecutionAdmissionDecisionReason.ACCEPTED
+    assert records.get_by_client_order_id(order_intent.client_order_id) is not None
+
+
 def test_not_ready_resolution_creates_no_admission_request_with_fake_context() -> None:
     decision = _resolve(order_intent=order(), instrument_rules=rules())
     assert decision.ready is False
     assert decision.reason is VenueCapabilityResolutionReason.VENUE_SNAPSHOT_MISSING
     assert decision.venue_validation_context is None
     assert decision.freshness_check is None
+
+
+def test_provenance_not_ready_resolution_creates_no_fake_admission_context() -> None:
+    decision = _resolve(
+        order_intent=order(),
+        venue_snapshot=venue(),
+        instrument_rules=rules(),
+        require_official_source_provenance=True,
+    )
+    assert decision.ready is False
+    assert decision.reason is VenueCapabilityResolutionReason.SOURCE_PROVENANCE_REQUIRED
+    assert decision.provenance_checked is True
+    assert decision.venue_validation_context is None
+    assert decision.freshness_check is not None
 
 
 def test_ready_resolution_plus_invalid_order_rejects_downstream_by_venue_capability() -> None:
@@ -154,6 +241,34 @@ def test_ready_resolution_plus_invalid_order_rejects_downstream_by_venue_capabil
     assert admission.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY
     assert admission.venue_validation_reason == VenueOrderValidationReason.PRICE_NOT_ON_TICK.value
     assert admission.venue_validation_details is not None
+    assert records.get_by_client_order_id(order_intent.client_order_id) is None
+
+
+def test_provenance_ready_invalid_order_rejects_downstream_by_venue_capability() -> None:
+    source_record = _source_record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    source_store = InMemoryVenueCapabilitySourceRecordStore()
+    source_store.put(source_record)
+    order_intent = order(order_type=OrderType.LIMIT, limit_price="100.05")
+    decision = _resolve(
+        order_intent=order_intent,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        instrument_rules=rules(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        source_record_store=source_store,
+        require_official_source_provenance=True,
+    )
+    assert decision.ready is True
+    coordinator, records = _coordinator()
+    admission = coordinator.admit(_request_from_resolution(decision))
+    assert admission.accepted is False
+    assert admission.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY
     assert records.get_by_client_order_id(order_intent.client_order_id) is None
 
 
@@ -175,6 +290,24 @@ def test_review_113_price_min_max_validation_preserved_through_flow() -> None:
     admission = coordinator.admit(_request_from_resolution(decision))
     assert admission.venue_validation_reason == (
         VenueOrderValidationReason.PRICE_BELOW_MINIMUM.value
+    )
+
+
+def test_review_115_venue_validation_reason_details_propagation_preserved() -> None:
+    order_intent = order(order_type=OrderType.LIMIT, limit_price="100.05")
+    decision = _resolve(
+        order_intent=order_intent,
+        venue_snapshot=venue(),
+        instrument_rules=rules(),
+    )
+    assert decision.ready is True
+    coordinator, _records = _coordinator()
+    admission = coordinator.admit(_request_from_resolution(decision))
+    assert admission.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_VENUE_CAPABILITY
+    assert admission.venue_validation_reason == VenueOrderValidationReason.PRICE_NOT_ON_TICK.value
+    assert admission.venue_validation_details is not None
+    assert admission.venue_validation_details["reason"] == (
+        VenueOrderValidationReason.PRICE_NOT_ON_TICK.value
     )
 
 
@@ -225,3 +358,13 @@ def test_review_117_freshness_mismatch_handling_preserved() -> None:
     admission = coordinator.admit(mismatched_request)
     assert admission.reason is ExecutionAdmissionDecisionReason.FRESHNESS_CONTEXT_MISMATCH
     assert records.get_by_client_order_id(order_intent.client_order_id) is None
+
+
+def test_review_118_missing_snapshot_no_context_behavior_preserved() -> None:
+    decision = _resolve(order_intent=order(), instrument_rules=rules())
+
+    assert decision.ready is False
+    assert decision.reason is VenueCapabilityResolutionReason.VENUE_SNAPSHOT_MISSING
+    assert decision.venue_snapshot is None
+    assert decision.venue_validation_context is None
+    assert decision.freshness_check is None

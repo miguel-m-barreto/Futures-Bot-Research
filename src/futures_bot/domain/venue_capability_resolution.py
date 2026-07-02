@@ -36,6 +36,14 @@ class VenueCapabilityResolutionReason(StrEnum):
     VENUE_SNAPSHOT_MISSING = "VENUE_SNAPSHOT_MISSING"
     INSTRUMENT_RULES_MISSING = "INSTRUMENT_RULES_MISSING"
     FRESHNESS_REJECTED = "FRESHNESS_REJECTED"
+    SOURCE_PROVENANCE_REQUIRED = "SOURCE_PROVENANCE_REQUIRED"
+    SOURCE_RECORD_MISSING = "SOURCE_RECORD_MISSING"
+    SOURCE_RECORD_NOT_ACCEPTED = "SOURCE_RECORD_NOT_ACCEPTED"
+    SOURCE_RECORD_NOT_OFFICIAL = "SOURCE_RECORD_NOT_OFFICIAL"
+    SOURCE_RECORD_NOT_HEALTHY = "SOURCE_RECORD_NOT_HEALTHY"
+    SOURCE_PAYLOAD_HASH_MISMATCH = "SOURCE_PAYLOAD_HASH_MISMATCH"
+    SOURCE_VENUE_MISMATCH = "SOURCE_VENUE_MISMATCH"
+    SOURCE_PROVENANCE_INVALID = "SOURCE_PROVENANCE_INVALID"
     VENUE_VALIDATION_CONTEXT_INVALID = "VENUE_VALIDATION_CONTEXT_INVALID"
     STORE_CONFLICT = "STORE_CONFLICT"
     REQUEST_VENUE_INSTRUMENT_MISMATCH = "REQUEST_VENUE_INSTRUMENT_MISMATCH"
@@ -50,6 +58,7 @@ class VenueCapabilityResolutionRequest(BaseModel):
     freshness_policy: VenueCapabilityFreshnessPolicy
     source_health: CapabilitySourceHealth
     correlation_id: str | None = None
+    require_official_source_provenance: bool = False
 
     @field_validator("checked_at")
     @classmethod
@@ -84,6 +93,9 @@ class VenueCapabilityResolutionDecision(BaseModel):
     venue_validation_context: VenueOrderValidationContext | None = None
     venue_source_record_id: VenueCapabilitySourceRecordId | None = None
     instrument_source_record_ids: tuple[VenueCapabilitySourceRecordId, ...] = ()
+    provenance_checked: bool = False
+    provenance_reason: str | None = None
+    provenance_details: Any | None = None
     checked_at: datetime
     details: Any
 
@@ -96,6 +108,13 @@ class VenueCapabilityResolutionDecision(BaseModel):
     @classmethod
     def _validate_details(cls, value: Any) -> Any:
         _canonical_json_bytes(value)
+        return value
+
+    @field_validator("provenance_details")
+    @classmethod
+    def _validate_provenance_details(cls, value: Any | None) -> Any | None:
+        if value is not None:
+            _canonical_json_bytes(value)
         return value
 
     @model_validator(mode="after")

@@ -24,6 +24,18 @@ fabricated. Freshness is evaluated before readiness; stale, future-dated,
 degraded, unavailable, or mismatched snapshots return not-ready decisions without
 creating a validation context.
 
+Resolution is backward-compatible by default. Existing snapshots without
+provenance can still resolve to ready when
+`require_official_source_provenance=False`.
+
+Official provenance can be required explicitly on the resolution request. In
+that mode, ready resolution requires both the venue snapshot and instrument rule
+snapshot to carry `source_record_id` and `source_payload_hash` values that point
+to stored source records. Those records must exist, belong to the same venue, be
+accepted for execution, have official trust, be healthy, and match the snapshot
+payload hash. Missing or invalid provenance returns a not-ready decision with a
+source provenance reason; the resolver never guesses replacement rules.
+
 A ready resolution is only a safe handoff bundle for the downstream capability
 gate: resolved snapshots, a freshness check/decision, and a
 `VenueOrderValidationContext`. It is not venue submission, and the gateway does

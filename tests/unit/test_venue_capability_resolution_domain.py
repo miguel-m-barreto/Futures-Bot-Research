@@ -67,6 +67,32 @@ def test_resolution_request_sets_deterministic_id() -> None:
     assert _request().request_id == _request().request_id
 
 
+def test_resolution_request_default_does_not_require_official_provenance() -> None:
+    request = _request()
+
+    assert request.require_official_source_provenance is False
+
+
+def test_resolution_request_with_official_provenance_requirement_is_deterministic() -> None:
+    left = VenueCapabilityResolutionRequest(
+        order_intent=order(),
+        checked_at=NOW,
+        freshness_policy=_policy(),
+        source_health=CapabilitySourceHealth.HEALTHY,
+        require_official_source_provenance=True,
+    )
+    right = VenueCapabilityResolutionRequest(
+        order_intent=order(),
+        checked_at=NOW,
+        freshness_policy=_policy(),
+        source_health=CapabilitySourceHealth.HEALTHY,
+        require_official_source_provenance=True,
+    )
+
+    assert left.request_id == right.request_id
+    assert left.request_id != _request().request_id
+
+
 def test_resolution_decision_ready_requires_ready_reason() -> None:
     request = _request()
     assert request.request_id is not None
@@ -122,4 +148,38 @@ def test_resolution_decision_details_must_be_json_compatible() -> None:
             reason=VenueCapabilityResolutionReason.VENUE_SNAPSHOT_MISSING,
             checked_at=NOW,
             details={"bad": object()},
+        )
+
+
+def test_resolution_decision_can_carry_provenance_status() -> None:
+    request = _request()
+    assert request.request_id is not None
+    decision = VenueCapabilityResolutionDecision(
+        request_id=request.request_id,
+        ready=False,
+        reason=VenueCapabilityResolutionReason.SOURCE_RECORD_MISSING,
+        provenance_checked=True,
+        provenance_reason=VenueCapabilityResolutionReason.SOURCE_RECORD_MISSING.value,
+        provenance_details={"snapshot_kind": "venue_snapshot"},
+        checked_at=NOW,
+        details={"provenance_reason": "SOURCE_RECORD_MISSING"},
+    )
+
+    assert decision.provenance_checked is True
+    assert decision.provenance_details == {"snapshot_kind": "venue_snapshot"}
+
+
+def test_resolution_decision_provenance_details_must_be_json_compatible() -> None:
+    request = _request()
+    assert request.request_id is not None
+    with pytest.raises(ValidationError):
+        VenueCapabilityResolutionDecision(
+            request_id=request.request_id,
+            ready=False,
+            reason=VenueCapabilityResolutionReason.SOURCE_RECORD_MISSING,
+            provenance_checked=True,
+            provenance_reason="SOURCE_RECORD_MISSING",
+            provenance_details={"bad": object()},
+            checked_at=NOW,
+            details={},
         )

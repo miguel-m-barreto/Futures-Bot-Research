@@ -1439,6 +1439,7 @@ def test_execution_capability_gate_test_files_do_not_import_forbidden_dependenci
         ROOT / "tests/unit/test_venue_capability_freshness_policy.py",
         ROOT / "tests/unit/test_venue_capability_resolution_domain.py",
         ROOT / "tests/unit/test_venue_capability_resolution_gateway.py",
+        ROOT / "tests/unit/test_venue_capability_source_resolution.py",
     )
     forbidden = (
         "sqlalchemy",
@@ -1482,6 +1483,7 @@ def test_venue_capability_source_contracts_do_not_import_forbidden_dependencies(
         ROOT / "src/futures_bot/domain/venue_capabilities.py",
         ROOT / "src/futures_bot/domain/venue_capability_resolution.py",
         ROOT / "src/futures_bot/venue_capabilities/resolution.py",
+        ROOT / "src/futures_bot/ports/venue_capability_resolution.py",
     )
     forbidden = (
         "requests",
@@ -1500,6 +1502,10 @@ def test_venue_capability_source_contracts_do_not_import_forbidden_dependencies(
         "Kafka",
         "Redis",
         "Postgres",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
         "datetime.now",
         "time.time",
         "random",
@@ -1513,6 +1519,7 @@ def test_venue_capability_source_contracts_do_not_import_forbidden_dependencies(
         "ExecutionSimulator",
         "BotBlueprint",
         "BotInstance",
+        "HardRiskGate",
         "Ledger",
         "open(",
         "write_text",
@@ -1527,3 +1534,15 @@ def test_venue_capability_source_contracts_do_not_import_forbidden_dependencies(
 def test_venue_capability_source_ports_do_not_import_infrastructure() -> None:
     lines = _import_lines(ROOT / "src/futures_bot/ports/venue_capability_sources.py")
     assert not any("infrastructure" in line for line in lines)
+
+
+def test_review_120_plr0913_regression_uses_scoped_resolution_waiver() -> None:
+    source = (ROOT / "src/futures_bot/venue_capabilities/resolution.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "_decision(  # noqa: PLR0913" in source
+    assert "noqa" not in source.replace("# noqa: PLR0913", "").replace(
+        "# noqa: PLR0911",
+        "",
+    )

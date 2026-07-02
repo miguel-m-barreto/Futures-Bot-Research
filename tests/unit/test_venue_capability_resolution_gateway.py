@@ -127,6 +127,20 @@ def test_stale_venue_snapshot_returns_freshness_rejected() -> None:
     assert decision.venue_validation_context is None
 
 
+def test_stale_venue_snapshot_rejects_before_provenance_check() -> None:
+    stale = venue(captured_at=NOW - timedelta(milliseconds=2))
+    venue_store, rule_store = _stores_with(venue_snapshot=stale, instrument_rules=rules())
+    decision = _gateway(venue_store, rule_store).resolve(
+        _request(
+            freshness_policy=_policy(max_age_ms=1),
+            require_official_source_provenance=True,
+        )
+    )
+    assert decision.reason is VenueCapabilityResolutionReason.FRESHNESS_REJECTED
+    assert decision.provenance_checked is False
+    assert decision.venue_validation_context is None
+
+
 def test_stale_instrument_rules_returns_freshness_rejected() -> None:
     stale = rules(captured_at=NOW - timedelta(milliseconds=2))
     venue_store, rule_store = _stores_with(venue_snapshot=venue(), instrument_rules=stale)
@@ -248,3 +262,4 @@ def test_gateway_does_not_validate_order_capability_it_only_builds_context() -> 
     assert decision.ready is True
     assert decision.venue_validation_context is not None
     assert decision.venue_validation_context.order_intent == off_tick_order
+    assert decision.provenance_checked is False

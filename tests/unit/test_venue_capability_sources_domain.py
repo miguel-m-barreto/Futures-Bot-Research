@@ -158,6 +158,17 @@ def test_source_record_rejected_can_use_untrusted_source() -> None:
     assert record.accepted_for_execution is False
 
 
+def test_review_119_source_contracts_unknown_untrusted_not_accepted_preserved() -> None:
+    with pytest.raises(ValidationError, match="UNKNOWN source_kind"):
+        _descriptor(
+            source_kind=VenueCapabilitySourceKind.UNKNOWN,
+            trust=VenueCapabilitySourceTrust.OFFICIAL,
+        )
+
+    with pytest.raises(ValidationError, match="OFFICIAL trust"):
+        _record(descriptor=_descriptor(trust=VenueCapabilitySourceTrust.UNTRUSTED))
+
+
 def test_source_record_rejected_cannot_use_accepted_reason() -> None:
     with pytest.raises(ValidationError, match="reason != ACCEPTED"):
         _record(accepted_for_execution=False)
