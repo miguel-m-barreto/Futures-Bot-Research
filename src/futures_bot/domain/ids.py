@@ -201,6 +201,18 @@ class VenueCapabilitySourceImportId(DomainId):
     pass
 
 
+class VenueCapabilityManualImportRequestId(DomainId):
+    pass
+
+
+class VenueCapabilityManualImportDecisionId(DomainId):
+    pass
+
+
+class VenueCapabilityManualImportGatewayId(DomainId):
+    pass
+
+
 class VenueCapabilitySourceHealthRecordId(DomainId):
     pass
 

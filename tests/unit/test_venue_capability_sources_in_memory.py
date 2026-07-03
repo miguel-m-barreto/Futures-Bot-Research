@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from tests.unit.capability_freshness_fixtures import rules, venue
 
+from futures_bot.domain.ids import (
+    VenueCapabilitySnapshotId,
+    VenueInstrumentRuleSnapshotId,
+)
 from futures_bot.domain.venue_capability_sources import (
     VenueCapabilityManualImport,
     VenueCapabilitySourceDescriptor,
@@ -17,8 +22,10 @@ from futures_bot.domain.venue_capability_sources import (
 )
 from futures_bot.venue_capabilities.in_memory import (
     InMemoryVenueCapabilityManualImportStore,
+    InMemoryVenueCapabilitySnapshotStore,
     InMemoryVenueCapabilitySourceDescriptorStore,
     InMemoryVenueCapabilitySourceRecordStore,
+    InMemoryVenueInstrumentRuleSnapshotStore,
 )
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -173,6 +180,19 @@ def test_manual_import_store_rejects_same_id_different_payload() -> None:
     store.put(manual_import)
     with pytest.raises(ValueError, match="manual import"):
         store.put(changed)
+
+
+def test_snapshot_stores_get_by_id_for_preflight() -> None:
+    venue_store = InMemoryVenueCapabilitySnapshotStore()
+    rule_store = InMemoryVenueInstrumentRuleSnapshotStore()
+    venue_snapshot = venue(snapshot_id=VenueCapabilitySnapshotId(value="venue-cap-50"))
+    rule_snapshot = rules(snapshot_id=VenueInstrumentRuleSnapshotId(value="rules-50"))
+
+    venue_store.put(venue_snapshot)
+    rule_store.put(rule_snapshot)
+
+    assert venue_store.get(venue_snapshot.snapshot_id) == venue_snapshot
+    assert rule_store.get(rule_snapshot.snapshot_id) == rule_snapshot
 
 
 def test_list_by_venue_id_is_deterministic_for_descriptors_records_and_imports() -> None:

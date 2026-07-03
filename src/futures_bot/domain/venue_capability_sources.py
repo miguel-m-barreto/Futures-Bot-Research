@@ -11,11 +11,15 @@ from typing import Any, NamedTuple, Self
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from futures_bot.domain.ids import (
+    VenueCapabilityManualImportDecisionId,
+    VenueCapabilityManualImportRequestId,
+    VenueCapabilitySnapshotId,
     VenueCapabilitySourceHealthRecordId,
     VenueCapabilitySourceId,
     VenueCapabilitySourceImportId,
     VenueCapabilitySourcePayloadHashId,
     VenueCapabilitySourceRecordId,
+    VenueInstrumentRuleSnapshotId,
 )
 from futures_bot.domain.time import ensure_aware_utc
 from futures_bot.domain.venue_capabilities import (
@@ -62,6 +66,22 @@ class VenueCapabilitySourceRecordReason(StrEnum):
     REJECTED_PAYLOAD_HASH_MISMATCH = "REJECTED_PAYLOAD_HASH_MISMATCH"
     REJECTED_NON_CANONICAL_PAYLOAD = "REJECTED_NON_CANONICAL_PAYLOAD"
     REJECTED_SOURCE_TIME_INVALID = "REJECTED_SOURCE_TIME_INVALID"
+
+
+class VenueCapabilityManualImportDecisionReason(StrEnum):
+    ACCEPTED = "ACCEPTED"
+    SOURCE_RECORD_NOT_ACCEPTED = "SOURCE_RECORD_NOT_ACCEPTED"
+    SOURCE_RECORD_NOT_OFFICIAL = "SOURCE_RECORD_NOT_OFFICIAL"
+    SOURCE_RECORD_NOT_HEALTHY = "SOURCE_RECORD_NOT_HEALTHY"
+    VENUE_SNAPSHOT_PROVENANCE_MISMATCH = "VENUE_SNAPSHOT_PROVENANCE_MISMATCH"
+    INSTRUMENT_RULE_PROVENANCE_MISMATCH = "INSTRUMENT_RULE_PROVENANCE_MISMATCH"
+    VENUE_ID_MISMATCH = "VENUE_ID_MISMATCH"
+    SOURCE_RECORD_STORE_CONFLICT = "SOURCE_RECORD_STORE_CONFLICT"
+    VENUE_SNAPSHOT_STORE_CONFLICT = "VENUE_SNAPSHOT_STORE_CONFLICT"
+    INSTRUMENT_RULE_STORE_CONFLICT = "INSTRUMENT_RULE_STORE_CONFLICT"
+    MANUAL_IMPORT_STORE_CONFLICT = "MANUAL_IMPORT_STORE_CONFLICT"
+    NO_SNAPSHOTS_PROVIDED = "NO_SNAPSHOTS_PROVIDED"
+    VALIDATION_FAILED = "VALIDATION_FAILED"
 
 
 class VenueCapabilitySourceDescriptor(BaseModel):
@@ -319,6 +339,88 @@ class VenueCapabilityManualImport(BaseModel):
         return self
 
 
+class VenueCapabilityManualImportRequest(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    request_id: VenueCapabilityManualImportRequestId | None = None
+    source_record: VenueCapabilitySourceRecord
+    venue_snapshot: VenueCapabilitySnapshot | None = None
+    instrument_rules: tuple[VenueInstrumentRuleSnapshot, ...] = ()
+    imported_at: datetime
+    imported_by: str
+    correlation_id: str | None = None
+    details: Any
+
+    @field_validator("imported_at")
+    @classmethod
+    def _validate_imported_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("imported_by", "correlation_id")
+    @classmethod
+    def _validate_text(cls, value: str | None) -> str | None:
+        return None if value is None else _trimmed(value, "manual import request text")
+
+    @field_validator("details")
+    @classmethod
+    def _validate_details(cls, value: Any) -> Any:
+        _validate_json_compatible(value, path="details")
+        _canonical_json_bytes(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if self.venue_snapshot is None and not self.instrument_rules:
+            raise ValueError("manual import request requires at least one snapshot")
+        expected = deterministic_venue_capability_manual_import_request_id(self)
+        if self.request_id is not None and self.request_id != expected:
+            raise ValueError("request_id is not deterministic")
+        object.__setattr__(self, "request_id", expected)
+        return self
+
+
+class VenueCapabilityManualImportDecision(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    decision_id: VenueCapabilityManualImportDecisionId | None = None
+    request_id: VenueCapabilityManualImportRequestId
+    accepted: bool
+    reason: VenueCapabilityManualImportDecisionReason
+    source_record_id: VenueCapabilitySourceRecordId | None = None
+    venue_snapshot_id: VenueCapabilitySnapshotId | None = None
+    instrument_rule_snapshot_ids: tuple[VenueInstrumentRuleSnapshotId, ...] = ()
+    manual_import_id: VenueCapabilitySourceImportId | None = None
+    imported_at: datetime
+    details: Any
+
+    @field_validator("imported_at")
+    @classmethod
+    def _validate_imported_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("details")
+    @classmethod
+    def _validate_details(cls, value: Any) -> Any:
+        _validate_json_compatible(value, path="details")
+        _canonical_json_bytes(value)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if self.accepted:
+            if self.reason is not VenueCapabilityManualImportDecisionReason.ACCEPTED:
+                raise ValueError("accepted=True requires reason ACCEPTED")
+            if self.manual_import_id is None:
+                raise ValueError("accepted=True requires manual_import_id")
+        elif self.reason is VenueCapabilityManualImportDecisionReason.ACCEPTED:
+            raise ValueError("accepted=False requires reason != ACCEPTED")
+        expected = deterministic_venue_capability_manual_import_decision_id(self)
+        if self.decision_id is not None and self.decision_id != expected:
+            raise ValueError("decision_id is not deterministic")
+        object.__setattr__(self, "decision_id", expected)
+        return self
+
+
 def deterministic_venue_capability_source_id(
     descriptor: VenueCapabilitySourceDescriptor,
 ) -> VenueCapabilitySourceId:
@@ -360,6 +462,22 @@ def deterministic_venue_capability_source_import_id(
 ) -> VenueCapabilitySourceImportId:
     digest = _digest(_model_identity(manual_import, exclude={"import_id"}))
     return VenueCapabilitySourceImportId(value=f"venue-cap-source-import:{digest}")
+
+
+def deterministic_venue_capability_manual_import_request_id(
+    request: VenueCapabilityManualImportRequest,
+) -> VenueCapabilityManualImportRequestId:
+    digest = _digest(_model_identity(request, exclude={"request_id"}))
+    return VenueCapabilityManualImportRequestId(value=f"venue-cap-manual-import-req:{digest}")
+
+
+def deterministic_venue_capability_manual_import_decision_id(
+    decision: VenueCapabilityManualImportDecision,
+) -> VenueCapabilityManualImportDecisionId:
+    digest = _digest(_model_identity(decision, exclude={"decision_id"}))
+    return VenueCapabilityManualImportDecisionId(
+        value=f"venue-cap-manual-import-decision:{digest}"
+    )
 
 
 class _SnapshotProvenanceRef(NamedTuple):

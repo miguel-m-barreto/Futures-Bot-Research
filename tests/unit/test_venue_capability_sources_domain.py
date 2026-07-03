@@ -9,6 +9,9 @@ from tests.unit.capability_freshness_fixtures import rules, venue
 from futures_bot.domain.ids import VenueCapabilitySourceRecordId
 from futures_bot.domain.venue_capability_sources import (
     VenueCapabilityManualImport,
+    VenueCapabilityManualImportDecision,
+    VenueCapabilityManualImportDecisionReason,
+    VenueCapabilityManualImportRequest,
     VenueCapabilitySourceDescriptor,
     VenueCapabilitySourceFetchMode,
     VenueCapabilitySourceHealthRecord,
@@ -234,6 +237,134 @@ def test_manual_import_accepts_matching_snapshot_and_rules() -> None:
     )
 
     assert manual_import.import_id is not None
+
+
+def test_manual_import_request_sets_deterministic_id() -> None:
+    source_record = _record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    request = VenueCapabilityManualImportRequest(
+        source_record=source_record,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        imported_at=NOW,
+        imported_by="operator",
+        details={"ticket": "review-1"},
+    )
+    same = VenueCapabilityManualImportRequest(
+        source_record=source_record,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        imported_at=NOW,
+        imported_by="operator",
+        details={"ticket": "review-1"},
+    )
+
+    assert request.request_id == same.request_id
+
+
+def test_manual_import_request_rejects_no_snapshots() -> None:
+    with pytest.raises(ValidationError, match="at least one snapshot"):
+        VenueCapabilityManualImportRequest(
+            source_record=_record(),
+            imported_at=NOW,
+            imported_by="operator",
+            details={},
+        )
+
+
+def test_manual_import_decision_acceptance_consistency() -> None:
+    source_record = _record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    request = VenueCapabilityManualImportRequest(
+        source_record=source_record,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+    manual_import = VenueCapabilityManualImport(
+        source_record=source_record,
+        venue_snapshot=request.venue_snapshot,
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+    assert request.request_id is not None
+    assert manual_import.import_id is not None
+
+    decision = VenueCapabilityManualImportDecision(
+        request_id=request.request_id,
+        accepted=True,
+        reason=VenueCapabilityManualImportDecisionReason.ACCEPTED,
+        source_record_id=source_record.record_id,
+        venue_snapshot_id=request.venue_snapshot.snapshot_id,
+        manual_import_id=manual_import.import_id,
+        imported_at=NOW,
+        details={},
+    )
+
+    assert decision.decision_id is not None
+
+
+def test_manual_import_decision_rejected_forbids_accepted_reason() -> None:
+    source_record = _record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    request = VenueCapabilityManualImportRequest(
+        source_record=source_record,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+    assert request.request_id is not None
+
+    with pytest.raises(ValidationError, match="reason != ACCEPTED"):
+        VenueCapabilityManualImportDecision(
+            request_id=request.request_id,
+            accepted=False,
+            reason=VenueCapabilityManualImportDecisionReason.ACCEPTED,
+            imported_at=NOW,
+            details={},
+        )
+
+
+def test_manual_import_decision_details_must_be_json_compatible() -> None:
+    source_record = _record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    request = VenueCapabilityManualImportRequest(
+        source_record=source_record,
+        venue_snapshot=venue(
+            source_record_id=source_record.record_id,
+            source_payload_hash=source_record.payload.payload_hash,
+        ),
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+    assert request.request_id is not None
+
+    with pytest.raises(ValidationError, match="JSON-compatible"):
+        VenueCapabilityManualImportDecision(
+            request_id=request.request_id,
+            accepted=False,
+            reason=VenueCapabilityManualImportDecisionReason.VALIDATION_FAILED,
+            imported_at=NOW,
+            details={"bad": object()},
+        )
 
 
 def test_manual_import_rejects_venue_snapshot_with_mismatched_venue() -> None:

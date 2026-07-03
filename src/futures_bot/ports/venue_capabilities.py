@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from futures_bot.domain.ids import (
+    VenueCapabilitySnapshotId,
+    VenueInstrumentRuleSnapshotId,
+)
 from futures_bot.domain.venue_capabilities import (
     VenueCapabilitySnapshot,
     VenueInstrumentRuleSnapshot,
@@ -17,6 +21,13 @@ class VenueCapabilitySnapshotStorePort(Protocol):
         """Store a venue capability snapshot idempotently."""
         ...
 
+    def get(
+        self,
+        snapshot_id: VenueCapabilitySnapshotId,
+    ) -> VenueCapabilitySnapshot | None:
+        """Return a venue capability snapshot by ID."""
+        ...
+
     def get_latest(self, venue_id: str) -> VenueCapabilitySnapshot | None:
         """Return the latest venue capability snapshot for a venue."""
         ...
@@ -27,6 +38,13 @@ class VenueInstrumentRuleSnapshotStorePort(Protocol):
 
     def put(self, snapshot: VenueInstrumentRuleSnapshot) -> None:
         """Store an instrument rule snapshot idempotently."""
+        ...
+
+    def get(
+        self,
+        snapshot_id: VenueInstrumentRuleSnapshotId,
+    ) -> VenueInstrumentRuleSnapshot | None:
+        """Return an instrument rule snapshot by ID."""
         ...
 
     def get_latest(

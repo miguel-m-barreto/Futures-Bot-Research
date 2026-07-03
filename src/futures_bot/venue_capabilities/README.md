@@ -64,6 +64,20 @@ import requires an accepted official source record and rejects venue or instrume
 snapshots whose venue, source record ID, or source payload hash do not match that
 record.
 
+The manual official import gateway writes reviewed, source-backed capability data
+into the deterministic stores used by resolution. It requires an accepted,
+official, healthy source record and venue/instrument snapshots whose venue,
+`source_record_id`, and `source_payload_hash` match that source record. The
+gateway preflights all source, snapshot, instrument rule, and manual import store
+conflicts before writing anything, so invalid or conflicting imports do not
+partially populate execution-eligible capability stores. Repeating the same import
+is accepted idempotently.
+
+Imported snapshots are immediately usable by strict provenance resolution. When
+`require_official_source_provenance=True`, resolution can return ready from these
+stores only when the imported source record and snapshot provenance remain
+official, healthy, accepted, venue-matched, and payload-hash consistent.
+
 Venue capability snapshots and instrument rule snapshots can carry optional
 `source_record_id` and `source_payload_hash` fields. The fields are backward
 compatible and optional for existing snapshots, but when one is present the other
@@ -73,8 +87,9 @@ Passing freshness and capability validation is still local acceptance only. It i
 not real venue submission.
 
 Official exchange ingestion and real adapters remain deferred. Endpoint mapping,
-venue-specific payload schemas, source TTLs, manual review workflow, persistent
-provenance stores, database schemas, runtime ingestion loops, and adapter-specific
-source health models require human review before implementation. This package
+venue-specific payload schemas, source TTLs, manual review workflow, import
+approval UI/API, persistent provenance stores, database schemas, runtime ingestion
+loops, and adapter-specific source health models require human review before
+implementation. This package
 performs no network calls, API polling, filesystem persistence, database writes,
 order submission, cancel, replace, or simulation.

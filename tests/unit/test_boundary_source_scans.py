@@ -1439,6 +1439,7 @@ def test_execution_capability_gate_test_files_do_not_import_forbidden_dependenci
         ROOT / "tests/unit/test_venue_capability_freshness_policy.py",
         ROOT / "tests/unit/test_venue_capability_resolution_domain.py",
         ROOT / "tests/unit/test_venue_capability_resolution_gateway.py",
+        ROOT / "tests/unit/test_venue_capability_manual_import_gateway.py",
         ROOT / "tests/unit/test_venue_capability_source_resolution.py",
     )
     forbidden = (

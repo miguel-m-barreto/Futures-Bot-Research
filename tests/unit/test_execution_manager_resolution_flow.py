@@ -35,6 +35,7 @@ from futures_bot.domain.venue_capability_resolution import (
     VenueCapabilityResolutionRequest,
 )
 from futures_bot.domain.venue_capability_sources import (
+    VenueCapabilityManualImportRequest,
     VenueCapabilitySourceDescriptor,
     VenueCapabilitySourceFetchMode,
     VenueCapabilitySourceHealthStatus,
@@ -52,12 +53,16 @@ from futures_bot.order_lifecycle.in_memory import (
     InMemoryOrderLifecycleEventStore,
 )
 from futures_bot.venue_capabilities.in_memory import (
+    InMemoryVenueCapabilityManualImportStore,
     InMemoryVenueCapabilitySnapshotStore,
     InMemoryVenueCapabilitySourceRecordStore,
     InMemoryVenueInstrumentRuleSnapshotStore,
 )
 from futures_bot.venue_capabilities.resolution import (
     DeterministicVenueCapabilityResolutionGateway,
+)
+from futures_bot.venue_capabilities.sources import (
+    DeterministicVenueCapabilityManualImportGateway,
 )
 
 
@@ -203,6 +208,62 @@ def test_provenance_ready_resolution_feeds_admission_and_accepts_local_order() -
     assert admission.accepted is True
     assert admission.reason is ExecutionAdmissionDecisionReason.ACCEPTED
     assert records.get_by_client_order_id(order_intent.client_order_id) is not None
+
+
+def test_manual_import_strict_resolution_feeds_execution_manager_acceptance() -> None:
+    source_record = _source_record()
+    assert source_record.record_id is not None
+    assert source_record.payload.payload_hash is not None
+    source_store = InMemoryVenueCapabilitySourceRecordStore()
+    venue_store = InMemoryVenueCapabilitySnapshotStore()
+    rule_store = InMemoryVenueInstrumentRuleSnapshotStore()
+    import_store = InMemoryVenueCapabilityManualImportStore()
+    venue_snapshot = venue(
+        source_record_id=source_record.record_id,
+        source_payload_hash=source_record.payload.payload_hash,
+    )
+    instrument_rules = rules(
+        source_record_id=source_record.record_id,
+        source_payload_hash=source_record.payload.payload_hash,
+    )
+    import_decision = DeterministicVenueCapabilityManualImportGateway(
+        source_record_store=source_store,
+        venue_snapshot_store=venue_store,
+        instrument_rule_store=rule_store,
+        manual_import_store=import_store,
+    ).import_capabilities(
+        VenueCapabilityManualImportRequest(
+            source_record=source_record,
+            venue_snapshot=venue_snapshot,
+            instrument_rules=(instrument_rules,),
+            imported_at=NOW,
+            imported_by="operator",
+            details={},
+        )
+    )
+    decision = DeterministicVenueCapabilityResolutionGateway(
+        venue_snapshot_store=venue_store,
+        instrument_rule_store=rule_store,
+        source_record_store=source_store,
+    ).resolve(
+        VenueCapabilityResolutionRequest(
+            order_intent=order(),
+            checked_at=NOW,
+            freshness_policy=_policy(),
+            source_health=CapabilitySourceHealth.HEALTHY,
+            require_official_source_provenance=True,
+        )
+    )
+
+    assert import_decision.accepted is True
+    assert decision.ready is True
+    coordinator, records = _coordinator()
+    admission = coordinator.admit(_request_from_resolution(decision))
+    assert admission.accepted is True
+    assert admission.reason is ExecutionAdmissionDecisionReason.ACCEPTED
+    assert records.get_by_client_order_id(
+        decision.venue_validation_context.order_intent.client_order_id
+    ) is not None
 
 
 def test_not_ready_resolution_creates_no_admission_request_with_fake_context() -> None:

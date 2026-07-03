@@ -9,6 +9,8 @@ from futures_bot.domain.ids import (
 )
 from futures_bot.domain.venue_capability_sources import (
     VenueCapabilityManualImport,
+    VenueCapabilityManualImportDecision,
+    VenueCapabilityManualImportRequest,
     VenueCapabilitySourceDescriptor,
     VenueCapabilitySourceRecord,
 )
@@ -84,4 +86,15 @@ class VenueCapabilityManualImportStorePort(Protocol):
         venue_id: str,
     ) -> tuple[VenueCapabilityManualImport, ...]:
         """Return manual imports for a venue in deterministic order."""
+        ...
+
+
+class VenueCapabilityManualImportGatewayPort(Protocol):
+    """Pure gateway for deterministic manual official capability imports."""
+
+    def import_capabilities(
+        self,
+        request: VenueCapabilityManualImportRequest,
+    ) -> VenueCapabilityManualImportDecision:
+        """Import source-backed capability snapshots into resolution stores."""
         ...

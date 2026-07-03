@@ -15,6 +15,8 @@ from futures_bot.domain.venue_capability_resolution import (
     VenueCapabilityResolutionRequest,
 )
 from futures_bot.domain.venue_capability_sources import (
+    VenueCapabilityManualImportDecisionReason,
+    VenueCapabilityManualImportRequest,
     VenueCapabilitySourceDescriptor,
     VenueCapabilitySourceFetchMode,
     VenueCapabilitySourceHealthStatus,
@@ -25,12 +27,16 @@ from futures_bot.domain.venue_capability_sources import (
     VenueCapabilitySourceTrust,
 )
 from futures_bot.venue_capabilities.in_memory import (
+    InMemoryVenueCapabilityManualImportStore,
     InMemoryVenueCapabilitySnapshotStore,
     InMemoryVenueCapabilitySourceRecordStore,
     InMemoryVenueInstrumentRuleSnapshotStore,
 )
 from futures_bot.venue_capabilities.resolution import (
     DeterministicVenueCapabilityResolutionGateway,
+)
+from futures_bot.venue_capabilities.sources import (
+    DeterministicVenueCapabilityManualImportGateway,
 )
 
 PAYLOAD_HASH = "1" * 64
@@ -376,3 +382,101 @@ def test_required_provenance_accepts_valid_venue_and_instrument_sources() -> Non
     assert decision.provenance_reason == "PROVENANCE_OK"
     assert decision.freshness_check is not None
     assert decision.venue_validation_context is not None
+
+
+def test_review_121_strict_provenance_resolution_preserved() -> None:
+    venue_store, rule_store, source_store = _strict_stores()
+
+    decision = _gateway(venue_store, rule_store, source_store).resolve(
+        _request(require_official_source_provenance=True)
+    )
+
+    assert decision.ready is True
+    assert decision.reason is VenueCapabilityResolutionReason.READY
+    assert decision.provenance_reason == "PROVENANCE_OK"
+
+
+def test_manual_import_then_strict_provenance_resolution_ready() -> None:
+    record = _record()
+    assert record.record_id is not None
+    assert record.payload.payload_hash is not None
+    venue_store = InMemoryVenueCapabilitySnapshotStore()
+    rule_store = InMemoryVenueInstrumentRuleSnapshotStore()
+    source_store = InMemoryVenueCapabilitySourceRecordStore()
+    import_store = InMemoryVenueCapabilityManualImportStore()
+    venue_snapshot = venue(
+        source_record_id=record.record_id,
+        source_payload_hash=record.payload.payload_hash,
+    )
+    instrument_rules = rules(
+        source_record_id=record.record_id,
+        source_payload_hash=record.payload.payload_hash,
+    )
+    import_request = VenueCapabilityManualImportRequest(
+        source_record=record,
+        venue_snapshot=venue_snapshot,
+        instrument_rules=(instrument_rules,),
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+
+    import_decision = DeterministicVenueCapabilityManualImportGateway(
+        source_record_store=source_store,
+        venue_snapshot_store=venue_store,
+        instrument_rule_store=rule_store,
+        manual_import_store=import_store,
+    ).import_capabilities(import_request)
+    resolution = _gateway(venue_store, rule_store, source_store).resolve(
+        _request(require_official_source_provenance=True)
+    )
+
+    assert import_decision.accepted is True
+    assert resolution.ready is True
+    assert resolution.reason is VenueCapabilityResolutionReason.READY
+
+
+def test_invalid_manual_import_does_not_allow_strict_provenance_resolution_ready() -> None:
+    record = _record()
+    assert record.record_id is not None
+    assert record.payload.payload_hash is not None
+    venue_store = InMemoryVenueCapabilitySnapshotStore()
+    rule_store = InMemoryVenueInstrumentRuleSnapshotStore()
+    source_store = InMemoryVenueCapabilitySourceRecordStore()
+    import_store = InMemoryVenueCapabilityManualImportStore()
+    venue_snapshot = venue(
+        source_record_id=record.record_id,
+        source_payload_hash=record.payload.payload_hash,
+    )
+    bad_rules = rules(
+        source_record_id=record.record_id,
+        source_payload_hash="0" * 64,
+    )
+    import_request = VenueCapabilityManualImportRequest(
+        source_record=record,
+        venue_snapshot=venue_snapshot,
+        instrument_rules=(bad_rules,),
+        imported_at=NOW,
+        imported_by="operator",
+        details={},
+    )
+
+    import_decision = DeterministicVenueCapabilityManualImportGateway(
+        source_record_store=source_store,
+        venue_snapshot_store=venue_store,
+        instrument_rule_store=rule_store,
+        manual_import_store=import_store,
+    ).import_capabilities(import_request)
+    resolution = _gateway(venue_store, rule_store, source_store).resolve(
+        _request(require_official_source_provenance=True)
+    )
+
+    assert import_decision.reason is (
+        VenueCapabilityManualImportDecisionReason.INSTRUMENT_RULE_PROVENANCE_MISMATCH
+    )
+    assert source_store.get(record.record_id) is None
+    assert venue_store.get(venue_snapshot.snapshot_id) is None
+    assert rule_store.get(bad_rules.snapshot_id) is None
+    assert import_store.list_by_venue_id("venue-1") == ()
+    assert resolution.ready is False
+    assert resolution.reason is VenueCapabilityResolutionReason.VENUE_SNAPSHOT_MISSING

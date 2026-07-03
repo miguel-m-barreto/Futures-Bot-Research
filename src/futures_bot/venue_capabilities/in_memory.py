@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from futures_bot.domain.ids import (
     VenueCapabilityFreshnessDecisionId,
+    VenueCapabilitySnapshotId,
     VenueCapabilitySourceId,
     VenueCapabilitySourceImportId,
     VenueCapabilitySourceRecordId,
+    VenueInstrumentRuleSnapshotId,
 )
 from futures_bot.domain.venue_capabilities import (
     VenueCapabilitySnapshot,
@@ -35,6 +37,12 @@ class InMemoryVenueCapabilitySnapshotStore:
         self._snapshots_by_id[key] = snapshot
         self._snapshot_ids_by_venue.setdefault(snapshot.venue_id, set()).add(key)
 
+    def get(
+        self,
+        snapshot_id: VenueCapabilitySnapshotId,
+    ) -> VenueCapabilitySnapshot | None:
+        return self._snapshots_by_id.get(str(snapshot_id))
+
     def get_latest(self, venue_id: str) -> VenueCapabilitySnapshot | None:
         snapshot_ids = self._snapshot_ids_by_venue.get(venue_id, set())
         snapshots = tuple(self._snapshots_by_id[snapshot_id] for snapshot_id in snapshot_ids)
@@ -60,6 +68,12 @@ class InMemoryVenueInstrumentRuleSnapshotStore:
         self._snapshots_by_id[key] = snapshot
         scope = (snapshot.venue_id, snapshot.instrument_id)
         self._snapshot_ids_by_scope.setdefault(scope, set()).add(key)
+
+    def get(
+        self,
+        snapshot_id: VenueInstrumentRuleSnapshotId,
+    ) -> VenueInstrumentRuleSnapshot | None:
+        return self._snapshots_by_id.get(str(snapshot_id))
 
     def get_latest(
         self,
