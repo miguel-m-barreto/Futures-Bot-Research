@@ -41,9 +41,31 @@ gate: resolved snapshots, a freshness check/decision, and a
 `VenueOrderValidationContext`. It is not venue submission, and the gateway does
 not itself decide whether the order passes venue order rules.
 
-Futures Bot v1 is stablecoin-collateral linear futures only. Supported collateral and
-settlement assets are USDT and USDC; inverse, coin-margined, multi-asset collateral,
-and portfolio-margin assumptions are intentionally outside this contract.
+The architecture is not stablecoin-only. Stablecoin-margined linear futures are one
+supported semantic case, alongside coin-margined futures, inverse contracts,
+multi-collateral accounts, portfolio-margin modes, cross-collateral modes, and
+objectives denominated in assets different from the instrument PnL or settlement
+asset. The domain model represents these cases from the beginning; execution is
+restricted by explicit capability and risk decisions when official venue rules,
+valuation rules, haircut rules, conversion rules, settlement rules, or liquidation
+semantics are incomplete.
+
+Instrument rules can carry optional contract asset semantics. When absent, legacy
+venue order validation behavior is preserved. When present, the validator checks
+asset-semantics readiness before accepting an order. A coin-margined, inverse, or
+multi-collateral instrument is not rejected merely because its margin, collateral,
+settlement, or PnL asset is not USDT or USDC; it is rejected only when the semantics
+needed for sizing, collateral valuation, settlement/PnL accounting, and capability
+validation are not explicit enough.
+
+Cross-venue price dislocation is not automatically executable arbitrage. A Binance
+price of 1200 and a KuCoin price of 1333 first require proof that both instruments
+describe comparable economic exposure: base asset, quote asset, payoff kind,
+settlement asset, PnL asset, valuation reference asset, and contract size must line
+up unless future explicit conversion semantics allow otherwise. Strategy and
+execution layers must still account for fees, slippage, depth, funding, latency,
+mark/index price, liquidation, and leg risk. These contracts add comparability
+semantics only; they do not implement arbitrage execution.
 
 Dead-man switch, rate-limit, self-trade-prevention, and price-protection capabilities
 are modeled as deterministic contracts, but no live runtime enforcement is added here.
@@ -93,3 +115,10 @@ loops, and adapter-specific source health models require human review before
 implementation. This package
 performs no network calls, API polling, filesystem persistence, database writes,
 order submission, cancel, replace, or simulation.
+
+NEEDS_HUMAN_REVIEW before execution: venue-specific asset semantics for Binance,
+KuCoin, CoinEx, MEXC, and Phemex; official inverse and coin-margined contract
+formulas; official portfolio-margin formulas; collateral haircut rules; conversion
+rules; objective asset policy; cross-venue arbitrage execution model; funding,
+fees, depth, slippage, and latency model; liquidation model; HardRiskGate
+integration; and ledger/accounting integration.

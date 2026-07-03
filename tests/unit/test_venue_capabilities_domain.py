@@ -6,6 +6,14 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from futures_bot.domain.asset_semantics import (
+    AssetClass,
+    AssetDescriptor,
+    CollateralMode,
+    ContractAssetSemantics,
+    ContractPayoffKind,
+    SettlementMode,
+)
 from futures_bot.domain.ids import (
     DeadManSwitchCapabilityId,
     VenueCapabilitySnapshotId,
@@ -73,6 +81,45 @@ def _venue(*, venue_id: str = "venue-1") -> VenueCapabilitySnapshot:
         supports_price_protection=True,
         supported_self_trade_prevention_modes=(VenueSelfTradePreventionMode.NONE,),
         dead_man_switch=_dead_man(),
+    )
+
+
+def _asset(symbol: str, asset_class: AssetClass = AssetClass.CRYPTO) -> AssetDescriptor:
+    return AssetDescriptor(symbol=symbol, asset_class=asset_class)
+
+
+def _stable(symbol: str) -> AssetDescriptor:
+    return _asset(symbol, AssetClass.STABLECOIN)
+
+
+def _asset_semantics(
+    *,
+    venue_id: str = "venue-1",
+    instrument_id: str = "BTC-PERP",
+    margin_asset: AssetDescriptor | None = None,
+    settlement_asset: AssetDescriptor | None = None,
+) -> ContractAssetSemantics:
+    margin = margin_asset or _stable("USDT")
+    settlement = settlement_asset or _stable("USDT")
+    return ContractAssetSemantics(
+        venue_id=venue_id,
+        instrument_id=instrument_id,
+        base_asset=_asset("BTC"),
+        quote_asset=_stable("USDT"),
+        margin_asset=margin,
+        settlement_asset=settlement,
+        pnl_asset=settlement,
+        collateral_assets=(margin,),
+        valuation_reference_asset=_stable("USDT"),
+        payoff_kind=ContractPayoffKind.LINEAR,
+        collateral_mode=CollateralMode.SINGLE_ASSET,
+        settlement_mode=SettlementMode.SINGLE_ASSET,
+        contract_size=Decimal("1"),
+        requires_collateral_valuation=False,
+        requires_haircut_rules=False,
+        requires_conversion_rules=False,
+        requires_objective_valuation=False,
+        metadata={},
     )
 
 
@@ -191,19 +238,25 @@ def test_precision_helpers_work_with_decimal() -> None:
     ).quantity_precision_ok(Decimal("1.2345"))
 
 
-def test_venue_capability_snapshot_restricts_supported_assets_to_stablecoins() -> None:
-    with pytest.raises(ValidationError, match="USDT/USDC"):
+def test_venue_capability_snapshot_accepts_explicit_non_stable_supported_assets() -> None:
+    venue = VenueCapabilitySnapshot(
+        **{
+            **_venue().model_dump(),
+            "supported_margin_assets": ("BTC",),
+            "supported_settlement_assets": ("BTC",),
+        }
+    )
+
+    assert venue.supported_margin_assets == ("BTC",)
+    assert venue.supported_settlement_assets == ("BTC",)
+
+
+def test_venue_capability_snapshot_rejects_empty_supported_assets() -> None:
+    with pytest.raises(ValidationError, match="non-empty"):
         VenueCapabilitySnapshot(
             **{
                 **_venue().model_dump(),
-                "supported_margin_assets": ("BTC",),
-            }
-        )
-    with pytest.raises(ValidationError, match="USDT/USDC"):
-        VenueCapabilitySnapshot(
-            **{
-                **_venue().model_dump(),
-                "supported_settlement_assets": ("BTC",),
+                "supported_margin_assets": (),
             }
         )
 
@@ -211,6 +264,50 @@ def test_venue_capability_snapshot_restricts_supported_assets_to_stablecoins() -
 def test_venue_instrument_rule_snapshot_rejects_invalid_max_leverage() -> None:
     with pytest.raises(ValidationError, match="max_leverage"):
         VenueInstrumentRuleSnapshot(**{**_rules().model_dump(), "max_leverage": "0"})
+
+
+def test_venue_instrument_rule_snapshot_accepts_absent_asset_semantics() -> None:
+    assert _rules().asset_semantics is None
+
+
+def test_venue_instrument_rule_snapshot_rejects_asset_semantics_venue_mismatch() -> None:
+    with pytest.raises(ValidationError, match="venue_id"):
+        VenueInstrumentRuleSnapshot(
+            **{
+                **_rules().model_dump(),
+                "asset_semantics": _asset_semantics(venue_id="venue-2"),
+            }
+        )
+
+
+def test_venue_instrument_rule_snapshot_rejects_asset_semantics_instrument_mismatch() -> None:
+    with pytest.raises(ValidationError, match="instrument_id"):
+        VenueInstrumentRuleSnapshot(
+            **{
+                **_rules().model_dump(),
+                "asset_semantics": _asset_semantics(instrument_id="ETH-PERP"),
+            }
+        )
+
+
+def test_venue_instrument_rule_snapshot_rejects_margin_asset_mismatch() -> None:
+    with pytest.raises(ValidationError, match="margin_asset"):
+        VenueInstrumentRuleSnapshot(
+            **{
+                **_rules().model_dump(),
+                "asset_semantics": _asset_semantics(margin_asset=_asset("BTC")),
+            }
+        )
+
+
+def test_venue_instrument_rule_snapshot_rejects_settlement_asset_mismatch() -> None:
+    with pytest.raises(ValidationError, match="settlement_asset"):
+        VenueInstrumentRuleSnapshot(
+            **{
+                **_rules().model_dump(),
+                "asset_semantics": _asset_semantics(settlement_asset=_asset("BTC")),
+            }
+        )
 
 
 def test_dead_man_switch_capability_requires_heartbeat_when_supported() -> None:

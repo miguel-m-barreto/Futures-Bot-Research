@@ -3,6 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from futures_bot.domain.asset_semantics import (
+    AssetClass,
+    AssetDescriptor,
+    AssetSemanticsReadinessReason,
+    CollateralMode,
+    ContractAssetSemantics,
+    ContractPayoffKind,
+    SettlementMode,
+)
 from futures_bot.domain.ids import (
     DeadManSwitchCapabilityId,
     VenueCapabilitySnapshotId,
@@ -69,6 +78,40 @@ def _venue(**overrides: object) -> VenueCapabilitySnapshot:
     }
     values.update(overrides)
     return VenueCapabilitySnapshot(**values)
+
+
+def _asset(symbol: str, asset_class: AssetClass = AssetClass.CRYPTO) -> AssetDescriptor:
+    return AssetDescriptor(symbol=symbol, asset_class=asset_class)
+
+
+def _stable(symbol: str) -> AssetDescriptor:
+    return _asset(symbol, AssetClass.STABLECOIN)
+
+
+def _asset_semantics(**overrides: object) -> ContractAssetSemantics:
+    values = {
+        "venue_id": "venue-1",
+        "instrument_id": "BTC-PERP",
+        "base_asset": _asset("BTC"),
+        "quote_asset": _stable("USDT"),
+        "margin_asset": _stable("USDT"),
+        "settlement_asset": _stable("USDT"),
+        "pnl_asset": _stable("USDT"),
+        "fee_asset": _stable("USDT"),
+        "collateral_assets": (_stable("USDT"),),
+        "valuation_reference_asset": _stable("USDT"),
+        "payoff_kind": ContractPayoffKind.LINEAR,
+        "collateral_mode": CollateralMode.SINGLE_ASSET,
+        "settlement_mode": SettlementMode.SINGLE_ASSET,
+        "contract_size": Decimal("1"),
+        "requires_collateral_valuation": False,
+        "requires_haircut_rules": False,
+        "requires_conversion_rules": False,
+        "requires_objective_valuation": False,
+        "metadata": {},
+    }
+    values.update(overrides)
+    return ContractAssetSemantics(**values)
 
 
 def _rules(**overrides: object) -> VenueInstrumentRuleSnapshot:
@@ -186,6 +229,12 @@ def test_valid_linear_usdt_order_passes() -> None:
     assert result.normalized_quantity == _order().quantity
 
 
+def test_validator_preserves_old_ok_behavior_without_asset_semantics() -> None:
+    context = _context(rules=_rules(asset_semantics=None))
+
+    assert validate_order_against_venue_capabilities(context).valid
+
+
 def test_disabled_venue_rejects() -> None:
     assert _reason(_context(venue=_venue(trading_status=VenueTradingStatus.DISABLED))) is (
         VenueOrderValidationReason.VENUE_TRADING_DISABLED
@@ -214,6 +263,51 @@ def test_btc_collateral_margin_rejects() -> None:
     assert _reason(_context(rules=_rules(margin_asset="BTC"))) is (
         VenueOrderValidationReason.UNSUPPORTED_MARGIN_ASSET
     )
+
+
+def test_asset_semantics_not_ready_rejects_with_details() -> None:
+    rules = _rules(
+        asset_semantics=_asset_semantics(payoff_kind=ContractPayoffKind.UNKNOWN),
+    )
+    result = validate_order_against_venue_capabilities(_context(rules=rules))
+
+    assert not result.valid
+    assert result.reason is VenueOrderValidationReason.ASSET_SEMANTICS_NOT_READY
+    assert result.details["asset_semantics_readiness_reason"] == (
+        AssetSemanticsReadinessReason.PAYOFF_KIND_UNKNOWN.value
+    )
+
+
+def test_ready_non_stablecoin_collateral_semantics_can_pass_validator() -> None:
+    btc = _asset("BTC")
+    usd = _asset("USD", AssetClass.FIAT)
+    rules = _rules(
+        contract_kind=FuturesContractKind.INVERSE_PERPETUAL,
+        margin_asset="BTC",
+        settlement_asset="BTC",
+        asset_semantics=_asset_semantics(
+            quote_asset=usd,
+            margin_asset=btc,
+            settlement_asset=btc,
+            pnl_asset=btc,
+            fee_asset=btc,
+            collateral_assets=(btc,),
+            valuation_reference_asset=usd,
+            payoff_kind=ContractPayoffKind.INVERSE,
+            contract_value_asset=usd,
+        ),
+    )
+    venue = _venue(
+        supported_margin_assets=("BTC",),
+        supported_settlement_assets=("BTC",),
+    )
+
+    result = validate_order_against_venue_capabilities(
+        _context(venue=venue, rules=rules)
+    )
+
+    assert result.valid
+    assert result.reason is VenueOrderValidationReason.OK
 
 
 def test_unsupported_order_type_rejects() -> None:

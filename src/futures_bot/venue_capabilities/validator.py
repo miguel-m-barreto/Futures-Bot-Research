@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 
+from futures_bot.domain.asset_semantics import (
+    validate_contract_asset_semantics_readiness,
+)
 from futures_bot.domain.order_lifecycle import OrderType, TimeInForce
 from futures_bot.domain.venue_capabilities import (
     FuturesContractKind,
@@ -61,21 +64,71 @@ def _trading_status_reason(
 def _contract_and_asset_reason(
     context: VenueOrderValidationContext,
 ) -> VenueOrderValidationReason | None:
+    rules = context.instrument_rules
+    if rules.asset_semantics is not None:
+        return _asset_semantics_contract_and_asset_reason(context)
+    return _legacy_contract_and_asset_reason(context)
+
+
+def _asset_semantics_contract_and_asset_reason(
+    context: VenueOrderValidationContext,
+) -> VenueOrderValidationReason | None:
     venue = context.venue_snapshot
     rules = context.instrument_rules
-    if rules.contract_kind not in {
-        FuturesContractKind.LINEAR_PERPETUAL,
-        FuturesContractKind.LINEAR_DELIVERY,
-    }:
-        return VenueOrderValidationReason.UNSUPPORTED_CONTRACT_KIND
-    if not _is_stable_asset(rules.margin_asset):
-        return VenueOrderValidationReason.UNSUPPORTED_MARGIN_ASSET
-    if not _is_stable_asset(rules.settlement_asset):
-        return VenueOrderValidationReason.UNSUPPORTED_SETTLEMENT_ASSET
-    if rules.margin_asset not in venue.supported_margin_assets:
-        return VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH
-    if rules.settlement_asset not in venue.supported_settlement_assets:
-        return VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH
+    if rules.asset_semantics is None:
+        raise ValueError("asset_semantics is required")
+    readiness = validate_contract_asset_semantics_readiness(rules.asset_semantics)
+    checks = (
+        (not readiness.ready, VenueOrderValidationReason.ASSET_SEMANTICS_NOT_READY),
+        (
+            rules.margin_asset not in venue.supported_margin_assets,
+            VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH,
+        ),
+        (
+            rules.settlement_asset not in venue.supported_settlement_assets,
+            VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH,
+        ),
+    )
+    for failed, reason in checks:
+        if failed:
+            return reason
+    return None
+
+
+def _legacy_contract_and_asset_reason(
+    context: VenueOrderValidationContext,
+) -> VenueOrderValidationReason | None:
+    venue = context.venue_snapshot
+    rules = context.instrument_rules
+    checks = (
+        (
+            rules.contract_kind
+            not in {
+                FuturesContractKind.LINEAR_PERPETUAL,
+                FuturesContractKind.LINEAR_DELIVERY,
+            },
+            VenueOrderValidationReason.UNSUPPORTED_CONTRACT_KIND,
+        ),
+        (
+            not _is_stable_asset(rules.margin_asset),
+            VenueOrderValidationReason.UNSUPPORTED_MARGIN_ASSET,
+        ),
+        (
+            not _is_stable_asset(rules.settlement_asset),
+            VenueOrderValidationReason.UNSUPPORTED_SETTLEMENT_ASSET,
+        ),
+        (
+            rules.margin_asset not in venue.supported_margin_assets,
+            VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH,
+        ),
+        (
+            rules.settlement_asset not in venue.supported_settlement_assets,
+            VenueOrderValidationReason.ACCOUNT_ASSET_MISMATCH,
+        ),
+    )
+    for failed, reason in checks:
+        if failed:
+            return reason
     return None
 
 
@@ -261,11 +314,27 @@ def _invalid(
     context: VenueOrderValidationContext,
     reason: VenueOrderValidationReason,
 ) -> VenueOrderValidationResult:
+    details = {"reason": reason.value}
+    if (
+        reason is VenueOrderValidationReason.ASSET_SEMANTICS_NOT_READY
+        and context.instrument_rules.asset_semantics is not None
+    ):
+        readiness = validate_contract_asset_semantics_readiness(
+            context.instrument_rules.asset_semantics
+        )
+        details = {
+            "reason": reason.value,
+            "asset_semantics_readiness_reason": readiness.reason.value,
+            "valuation_requirements": [
+                requirement.value for requirement in readiness.valuation_requirements
+            ],
+            "readiness_details": readiness.details,
+        }
     return VenueOrderValidationResult(
         validation_id=_validation_id(context),
         valid=False,
         reason=reason,
-        details={"reason": reason.value},
+        details=details,
     )
 
 

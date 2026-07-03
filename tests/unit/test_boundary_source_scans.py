@@ -522,6 +522,69 @@ def test_replay_timeline_coverage_diff_modules_do_not_import_execution_types() -
             )
 
 
+def test_asset_semantics_modules_do_not_import_external_infra_or_runtime() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/asset_semantics.py",
+        ROOT / "src/futures_bot/venue_capabilities/asset_semantics.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "open(",
+        "write_text",
+        "read_text",
+        "ExecutionSimulator",
+        "MatchingEngine",
+        "LedgerMutation",
+        "ExchangeAdapter",
+        "HardRiskGate",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_venue_asset_semantics_no_hardcoded_stablecoin_only_execution_assumption() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/asset_semantics.py",
+        ROOT / "src/futures_bot/venue_capabilities/asset_semantics.py",
+        ROOT / "src/futures_bot/venue_capabilities/validator.py",
+    )
+    forbidden_phrases = (
+        "supported assets must be limited to USDT/USDC",
+        "stablecoin-collateral linear futures only",
+        "inverse, coin-margined, multi-asset collateral",
+        "portfolio-margin assumptions are intentionally outside",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"found {phrase!r} in {path.name}"
+
+
 def test_replay_artifact_fingerprint_source_does_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/replay/integrity.py",

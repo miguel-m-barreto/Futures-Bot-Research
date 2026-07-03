@@ -11,6 +11,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from futures_bot.domain.asset_semantics import ContractAssetSemantics
 from futures_bot.domain.ids import (
     DeadManSwitchCapabilityId,
     VenueCapabilitySnapshotId,
@@ -105,6 +106,7 @@ class VenueOrderValidationReason(StrEnum):
     QUANTITY_PRECISION_EXCEEDED = "QUANTITY_PRECISION_EXCEEDED"
     VENUE_INSTRUMENT_MISMATCH = "VENUE_INSTRUMENT_MISMATCH"
     ACCOUNT_ASSET_MISMATCH = "ACCOUNT_ASSET_MISMATCH"
+    ASSET_SEMANTICS_NOT_READY = "ASSET_SEMANTICS_NOT_READY"
 
 
 class PriceFilter(BaseModel):
@@ -311,13 +313,11 @@ class VenueCapabilitySnapshot(BaseModel):
 
     @field_validator("supported_margin_assets", "supported_settlement_assets")
     @classmethod
-    def _validate_stable_assets(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def _validate_supported_assets(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         if not value:
             raise ValueError("supported assets must be non-empty")
-        stable = {item.value for item in StableCollateralAsset}
         for item in value:
-            if item not in stable:
-                raise ValueError("supported assets must be limited to USDT/USDC")
+            _trimmed(item, "supported asset")
         return value
 
     @field_validator("source_hash", "source_payload_hash")
@@ -363,6 +363,7 @@ class VenueInstrumentRuleSnapshot(BaseModel):
     min_gtd_duration_ms: int | None = None
     supports_price_protection: bool
     supported_self_trade_prevention_modes: tuple[VenueSelfTradePreventionMode, ...]
+    asset_semantics: ContractAssetSemantics | None = None
     source_hash: str | None = None
     source_record_id: VenueCapabilitySourceRecordId | None = None
     source_payload_hash: str | None = None
@@ -407,6 +408,17 @@ class VenueInstrumentRuleSnapshot(BaseModel):
             raise ValueError(
                 "source_record_id and source_payload_hash must be present together"
             )
+        if self.asset_semantics is not None:
+            if self.asset_semantics.venue_id != self.venue_id:
+                raise ValueError("asset_semantics venue_id must match instrument rules")
+            if self.asset_semantics.instrument_id != self.instrument_id:
+                raise ValueError("asset_semantics instrument_id must match instrument rules")
+            if self.asset_semantics.margin_asset.symbol != self.margin_asset:
+                raise ValueError("asset_semantics margin_asset must match instrument rules")
+            if self.asset_semantics.settlement_asset.symbol != self.settlement_asset:
+                raise ValueError(
+                    "asset_semantics settlement_asset must match instrument rules"
+                )
         return self
 
 

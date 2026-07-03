@@ -213,6 +213,30 @@ class VenueCapabilityManualImportGatewayId(DomainId):
     pass
 
 
+class AssetSymbolId(DomainId):
+    pass
+
+
+class AssetSemanticsId(DomainId):
+    pass
+
+
+class ContractAssetSemanticsId(DomainId):
+    pass
+
+
+class EconomicExposureId(DomainId):
+    pass
+
+
+class ObjectiveAssetPolicyId(DomainId):
+    pass
+
+
+class CollateralValuationPolicyId(DomainId):
+    pass
+
+
 class VenueCapabilitySourceHealthRecordId(DomainId):
     pass
 
