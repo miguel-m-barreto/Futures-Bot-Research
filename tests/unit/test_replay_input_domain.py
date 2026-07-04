@@ -112,9 +112,22 @@ def test_valid_replay_instrument_ref_with_usdt_settlement() -> None:
     assert str(instrument.quote_asset) == "USDT"
 
 
-def test_replay_instrument_ref_rejects_unsupported_stable_asset() -> None:
-    with pytest.raises(ValidationError, match="USDT or USDC"):
-        _instrument(settlement_asset="USD")
+def test_replay_instrument_ref_accepts_non_stable_settlement_and_quote_assets() -> None:
+    instrument = ReplayInstrumentRef(
+        venue="deribit",
+        symbol="BTC-PERPETUAL",
+        market_type="coin-margined-futures",
+        settlement_asset="BTC",
+        quote_asset="USD",
+        collateral_asset="BTC",
+        pnl_asset="BTC",
+        base_asset="BTC",
+    )
+
+    assert str(instrument.settlement_asset) == "BTC"
+    assert str(instrument.quote_asset) == "USD"
+    assert str(instrument.collateral_asset) == "BTC"
+    assert str(instrument.pnl_asset) == "BTC"
 
 
 def test_replay_input_record_accepts_decimal_payload_and_rejects_float() -> None:
@@ -183,6 +196,22 @@ def test_replay_input_dataset_validates_instruments_and_time_range() -> None:
     assert _dataset().dataset_id == "ds-1"
     with pytest.raises(ValidationError, match="duplicate instruments"):
         _dataset(instruments=(_instrument(), _instrument()))
+    dataset = _dataset(
+        instruments=(
+            _instrument(symbol="BTCUSD", settlement_asset="BTC"),
+            ReplayInstrumentRef(
+                venue="binance",
+                symbol="BTCUSD",
+                market_type="coin-margined-futures",
+                settlement_asset="BTC",
+                quote_asset="USD",
+                collateral_asset="BTC",
+                pnl_asset="BTC",
+                base_asset="BTC",
+            ),
+        )
+    )
+    assert len(dataset.instruments) == 2
     with pytest.raises(ValidationError, match="start_at"):
         ReplayInputDataset(
             input_dataset_id="input-ds-1",

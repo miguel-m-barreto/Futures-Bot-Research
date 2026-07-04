@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.assets import AssetAmount, StableCollateralAsset
+from futures_bot.domain.assets import AssetAmount, AssetSymbol
 from futures_bot.domain.execution import (
     ExecutionIntent,
     ExecutionIntentStatus,
@@ -45,7 +45,7 @@ def _execution_intent(**overrides: object) -> ExecutionIntent:
         "bot_id": BotId("bot-1"),
         "decision_intent_id": DecisionIntentId("decision-intent-1"),
         "order_intent": _order_intent(),
-        "quote_asset": StableCollateralAsset("USDT"),
+        "margin_asset": "USDT",
         "max_margin": AssetAmount(asset="USDT", amount="25"),
         "created_at": _created_at(),
     }
@@ -86,6 +86,16 @@ def test_execution_intent_rejects_non_positive_max_margin() -> None:
         _execution_intent(max_margin=AssetAmount(asset="USDT", amount="0"))
 
 
+def test_execution_intent_accepts_btc_margin_asset() -> None:
+    intent = _execution_intent(
+        margin_asset="BTC",
+        max_margin=AssetAmount(asset="BTC", amount="0.05"),
+    )
+
+    assert intent.margin_asset == AssetSymbol("BTC")
+    assert intent.max_margin == AssetAmount(asset="BTC", amount="0.05")
+
+
 def test_execution_intent_normalizes_aware_datetime_and_defaults_status() -> None:
     intent = _execution_intent()
 
@@ -98,3 +108,5 @@ def test_execution_intent_does_not_contain_exchange_fact_ids() -> None:
 
     assert "exchange_order_id" not in fields
     assert "fill_id" not in fields
+    assert "quote_asset" not in fields
+    assert "margin_asset" in fields

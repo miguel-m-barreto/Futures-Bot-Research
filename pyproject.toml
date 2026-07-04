@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "futures-bot-research"
 version = "0.1.0"
-description = "Python-first research foundation for stablecoin-collateral futures bots."
+description = "Python-first research foundation for multi-asset futures bot domain modeling."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

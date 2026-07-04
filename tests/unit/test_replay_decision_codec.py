@@ -390,9 +390,15 @@ def test_decode_rejects_semantically_equivalent_non_official_encodings(tamper: s
 
 @pytest.mark.parametrize(
     ("asset", "amount"),
-    (("USDT", "12.3400"), ("USDC", "0.0100")),
+    (
+        ("USDT", "12.3400"),
+        ("USDC", "0.0100"),
+        ("BTC", "12.3400"),
+        ("ETH", "12.3400"),
+        ("BNB", "12.3400"),
+    ),
 )
-def test_stable_collateral_margin_round_trips_with_lexical_scale(
+def test_generic_margin_round_trips_with_lexical_scale(
     asset: str,
     amount: str,
 ) -> None:
@@ -421,9 +427,6 @@ def test_stable_collateral_margin_round_trips_with_lexical_scale(
 @pytest.mark.parametrize(
     "proposed_margin",
     (
-        {"asset": {"value": "BTC"}, "amount": "12.3400"},
-        {"asset": {"value": "ETH"}, "amount": "12.3400"},
-        {"asset": {"value": "BNB"}, "amount": "12.3400"},
         {"asset": {"value": "USDT"}, "amount": 1.25},
         {"asset": {"value": "USDT"}, "amount": True},
         {"asset": {"value": "USDT"}, "amount": {"value": "1"}},
@@ -431,7 +434,7 @@ def test_stable_collateral_margin_round_trips_with_lexical_scale(
         {"asset": {"value": "USDT"}},
     ),
 )
-def test_stable_collateral_margin_rejects_nested_tampering(proposed_margin) -> None:
+def test_generic_margin_rejects_nested_tampering(proposed_margin) -> None:
     fixture = replay_decision_market_fixture()
     envelope = _envelope(
         fixture,
@@ -466,7 +469,7 @@ def test_stable_collateral_margin_rejects_nested_tampering(proposed_margin) -> N
         AssetAmount(asset="USDT", amount="12.3400").model_copy(update={"amount": 1.25}),
     ),
 )
-def test_stable_collateral_margin_rejects_model_copy_tampering(bad_margin) -> None:
+def test_generic_margin_rejects_model_copy_tampering(bad_margin) -> None:
     fixture = replay_decision_market_fixture()
 
     with pytest.raises(ValidationError):

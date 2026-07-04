@@ -190,15 +190,15 @@ class AssetAmount(BaseModel):
         return value
 
     @classmethod
-    def zero(cls, asset: AssetSymbol | StableCollateralAsset | str) -> Self:
+    def zero(cls, asset: AssetSymbol | str) -> Self:
         return cls(asset=_coerce_asset_symbol(asset), amount=Decimal("0"))
 
     @classmethod
-    def non_negative(cls, asset: AssetSymbol | StableCollateralAsset | str, amount: object) -> Self:
+    def non_negative(cls, asset: AssetSymbol | str, amount: object) -> Self:
         return cls(asset=_coerce_asset_symbol(asset), amount=_coerce_decimal(amount))
 
     @classmethod
-    def positive(cls, asset: AssetSymbol | StableCollateralAsset | str, amount: object) -> Self:
+    def positive(cls, asset: AssetSymbol | str, amount: object) -> Self:
         asset_amount = cls(asset=_coerce_asset_symbol(asset), amount=_coerce_decimal(amount))
         if asset_amount.amount <= 0:
             raise ValueError("asset amount must be positive")
@@ -255,7 +255,7 @@ class AssetDelta(BaseModel):
         return value
 
     @classmethod
-    def zero(cls, asset: AssetSymbol | StableCollateralAsset | str) -> Self:
+    def zero(cls, asset: AssetSymbol | str) -> Self:
         return cls(asset=_coerce_asset_symbol(asset), amount=Decimal("0"))
 
     def _ensure_same_asset(self, other: AssetDelta) -> None:
@@ -277,7 +277,7 @@ def _coerce_asset_symbol(value: object) -> AssetSymbol:
     if isinstance(value, AssetSymbol | str | Mapping):
         return _strict_asset_symbol_input(value)
     raise ValueError(
-        "asset must be an AssetSymbol, StableCollateralAsset, string, "
+        "asset must be an AssetSymbol, string, stable collateral helper, "
         "or serialized mapping"
     )
 

@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.assets import AssetAmount, AssetSymbol, StableCollateralAsset
+from futures_bot.domain.assets import AssetAmount, AssetSymbol
 from futures_bot.domain.decisions import (
     DecisionIntent,
     DecisionIntentStatus,
@@ -274,14 +274,24 @@ def test_rejected_candidate_validates_text_and_timestamp() -> None:
 
 
 def test_decision_intent_accepts_valid_existing_asset_amount() -> None:
-    valid_margin = AssetAmount(asset=StableCollateralAsset("USDT"), amount="100.0000")
+    valid_margin = AssetAmount(asset="BTC", amount="100.0000")
     intent = DecisionIntent(
         **_base_intent_kwargs(),
         proposed_margin=valid_margin,
     )
-    assert intent.proposed_margin == AssetAmount(asset="USDT", amount="100.0000")
+    assert intent.proposed_margin == AssetAmount(asset="BTC", amount="100.0000")
     assert isinstance(intent.proposed_margin.asset, AssetSymbol)
     assert isinstance(intent.proposed_margin.amount, Decimal)
+
+
+@pytest.mark.parametrize("asset", ["BTC", "ETH", "BNB"])
+def test_decision_intent_accepts_non_stable_proposed_margin(asset: str) -> None:
+    intent = DecisionIntent(
+        **_base_intent_kwargs(),
+        proposed_margin=AssetAmount(asset=asset, amount="10"),
+    )
+
+    assert intent.proposed_margin == AssetAmount(asset=asset, amount="10")
 
 
 def test_decision_intent_accepts_none_margin() -> None:
@@ -289,12 +299,10 @@ def test_decision_intent_accepts_none_margin() -> None:
     assert intent.proposed_margin is None
 
 
-def test_decision_intent_rejects_asset_amount_with_corrupted_stable_collateral_asset() -> None:
-    bad_stable = StableCollateralAsset("USDT").model_copy(
-        update={"symbol": AssetSymbol("USD")}
-    )
+def test_decision_intent_rejects_asset_amount_with_corrupted_asset_symbol() -> None:
+    bad_symbol = AssetSymbol("BTC").model_copy(update={"value": "bad!"})
     bad_amount = AssetAmount(asset="USDT", amount="1").model_copy(
-        update={"asset": bad_stable}
+        update={"asset": bad_symbol}
     )
     with pytest.raises(ValidationError):
         DecisionIntent(**_base_intent_kwargs(), proposed_margin=bad_amount)

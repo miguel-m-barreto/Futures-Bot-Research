@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -7,7 +8,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.assets import AssetAmount, StableCollateralAsset
+from futures_bot.domain.assets import AssetAmount, AssetSymbol
 from futures_bot.domain.ids import (
     BotId,
     DecisionIntentId,
@@ -109,10 +110,15 @@ class ExecutionIntent(BaseModel):
     bot_id: BotId
     decision_intent_id: DecisionIntentId
     order_intent: OrderIntent
-    quote_asset: StableCollateralAsset
+    margin_asset: AssetSymbol
     max_margin: AssetAmount
     status: ExecutionIntentStatus = ExecutionIntentStatus.CREATED
     created_at: datetime
+
+    @field_validator("margin_asset", mode="before")
+    @classmethod
+    def _coerce_margin_asset(cls, value: object) -> AssetSymbol:
+        return _coerce_asset_symbol(value)
 
     @field_validator("created_at")
     @classmethod
@@ -121,8 +127,8 @@ class ExecutionIntent(BaseModel):
 
     @model_validator(mode="after")
     def _validate_margin(self) -> Self:
-        if self.max_margin.asset != self.quote_asset.symbol:
-            raise ValueError("max_margin asset must match quote_asset")
+        if self.max_margin.asset != self.margin_asset:
+            raise ValueError("max_margin asset must match margin_asset")
         if self.max_margin.amount <= 0:
             raise ValueError("max_margin amount must be positive")
         return self
@@ -132,6 +138,27 @@ def _trimmed(value: str, field_name: str) -> str:
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be a non-empty trimmed string")
     return value
+
+
+def _coerce_asset_symbol(value: object) -> AssetSymbol:
+    if (
+        isinstance(value, Mapping)
+        and set(value) == {"symbol"}
+        and isinstance(value.get("symbol"), Mapping)
+        and set(value["symbol"]) == {"value"}
+        and isinstance(value["symbol"].get("value"), str)
+    ):
+        return AssetSymbol(value["symbol"]["value"])
+    if isinstance(value, AssetSymbol):
+        return AssetSymbol.model_validate(value.model_dump())
+    if isinstance(value, str):
+        return AssetSymbol(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="json")
+        if isinstance(dumped, Mapping):
+            return _coerce_asset_symbol(dumped)
+    return AssetSymbol.model_validate(value)
 
 
 def _coerce_decimal(value: object) -> Decimal:

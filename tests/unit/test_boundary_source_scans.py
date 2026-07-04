@@ -22,6 +22,54 @@ def _import_lines(path: Path) -> list[str]:
     ]
 
 
+def test_legacy_domain_models_do_not_require_stable_collateral_asset() -> None:
+    bots_source = (ROOT / "src/futures_bot/domain/bots.py").read_text(encoding="utf-8")
+    buckets_source = (ROOT / "src/futures_bot/domain/buckets.py").read_text(
+        encoding="utf-8"
+    )
+    decisions_source = (ROOT / "src/futures_bot/domain/decisions.py").read_text(
+        encoding="utf-8"
+    )
+    execution_source = (ROOT / "src/futures_bot/domain/execution.py").read_text(
+        encoding="utf-8"
+    )
+    replay_source = (ROOT / "src/futures_bot/domain/replay.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "StableCollateralAsset" not in bots_source
+    assert "StableCollateralAsset" not in buckets_source
+    assert "StableCollateralAsset" not in decisions_source
+    assert "StableCollateralAsset" not in execution_source
+    assert "quote_asset: StableCollateralAsset" not in execution_source
+    assert "margin_asset: AssetSymbol" in execution_source
+    assert "StableCollateralAsset" not in replay_source
+    assert "settlement_asset: AssetSymbol" in replay_source
+    assert "quote_asset: AssetSymbol | None" in replay_source
+
+
+def test_public_docs_no_longer_describe_stablecoin_only_domain_scope() -> None:
+    public_text = "\n".join(
+        (
+            (ROOT / ("README." + "md")).read_text(encoding="utf-8"),
+            (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        )
+    ).lower()
+
+    forbidden = (
+        "current stablecoin-collateral sprint scope",
+        "supports stablecoin-collateral futures only",
+        "current allowed capital",
+        "out of current sprint scope",
+        "stablecoin-collateral futures bots",
+    )
+    for phrase in forbidden:
+        assert phrase not in public_text
+    assert "stablecoin-margined linear futures" in public_text
+    assert "multi-asset futures bot domain modeling" in public_text
+    assert "no implicit conversion is implemented" in public_text
+
+
 def test_sidecar_runtime_domain_and_ports_do_not_import_infrastructure() -> None:
     paths = (
         ROOT / "src/futures_bot/domain/sidecars.py",

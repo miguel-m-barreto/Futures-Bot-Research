@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.assets import AssetAmount, StableCollateralAsset
+from futures_bot.domain.assets import AssetAmount, AssetSymbol
 from futures_bot.domain.buckets import BucketState
 from futures_bot.domain.ids import BotId, BucketId
 
@@ -16,7 +16,7 @@ def test_valid_bucket_creation_and_tradable_units() -> None:
     bucket = BucketState(
         bucket_id=BucketId("bucket-1"),
         bot_id=BotId("bot-1"),
-        capital_asset=StableCollateralAsset("USDT"),
+        capital_asset="USDT",
         initial_units=_amount("USDT", "100"),
         active_units=_amount("USDT", "80"),
         reserved_units=_amount("USDT", "30"),
@@ -32,7 +32,7 @@ def test_settled_profit_is_not_tradable() -> None:
     bucket = BucketState(
         bucket_id=BucketId("bucket-1"),
         bot_id=BotId("bot-1"),
-        capital_asset=StableCollateralAsset("USDC"),
+        capital_asset="USDC",
         initial_units=_amount("USDC", "100"),
         active_units=_amount("USDC", "10"),
         reserved_units=_amount("USDC", "0"),
@@ -47,7 +47,7 @@ def test_bucket_rejects_amount_asset_mismatch() -> None:
         BucketState(
             bucket_id=BucketId("bucket-1"),
             bot_id=BotId("bot-1"),
-            capital_asset=StableCollateralAsset("USDT"),
+            capital_asset="USDT",
             initial_units=_amount("USDT", "100"),
             active_units=_amount("USDC", "80"),
             reserved_units=_amount("USDT", "30"),
@@ -60,7 +60,7 @@ def test_bucket_rejects_reserved_greater_than_active() -> None:
         BucketState(
             bucket_id=BucketId("bucket-1"),
             bot_id=BotId("bot-1"),
-            capital_asset=StableCollateralAsset("USDT"),
+            capital_asset="USDT",
             initial_units=_amount("USDT", "100"),
             active_units=_amount("USDT", "20"),
             reserved_units=_amount("USDT", "30"),
@@ -73,7 +73,31 @@ def test_bucket_rejects_negative_units() -> None:
         _amount("USDT", "-1")
 
 
-@pytest.mark.parametrize("asset", ["ETH", "BTC"])
-def test_bucket_rejects_eth_btc_capital_asset(asset: str) -> None:
-    with pytest.raises(ValidationError):
-        StableCollateralAsset(asset)
+def test_bucket_accepts_eth_capital_asset() -> None:
+    bucket = BucketState(
+        bucket_id=BucketId("bucket-1"),
+        bot_id=BotId("bot-1"),
+        capital_asset="ETH",
+        initial_units=_amount("ETH", "10"),
+        active_units=_amount("ETH", "8"),
+        reserved_units=_amount("ETH", "3"),
+        settled_profit_units=_amount("ETH", "2"),
+    )
+
+    assert bucket.capital_asset == AssetSymbol("ETH")
+    assert bucket.tradable_units == AssetAmount(asset="ETH", amount=Decimal("5"))
+
+
+def test_bucket_rejects_tradable_units_for_different_asset() -> None:
+    bucket = BucketState(
+        bucket_id=BucketId("bucket-1"),
+        bot_id=BotId("bot-1"),
+        capital_asset="BTC",
+        initial_units=_amount("BTC", "10"),
+        active_units=_amount("BTC", "8"),
+        reserved_units=_amount("BTC", "3"),
+        settled_profit_units=_amount("BTC", "2"),
+    )
+
+    with pytest.raises(ValueError, match="capital_asset"):
+        bucket.has_tradable_units_for(_amount("ETH", "1"))

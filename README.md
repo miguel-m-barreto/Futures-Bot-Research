@@ -14,28 +14,19 @@ Replay, paper, and shadow modes are validation stages, not the final purpose.
 Live execution is a goal after evidence, auditability, RiskGate, Ledger, Execution,
 reconciliation, and kill-switch work are implemented and validated.
 
-## Current Stablecoin-Collateral Sprint Scope
+## Domain Asset Scope
 
-The current implementation supports stablecoin-collateral futures only. This is the current sprint
-scope, not a forever limitation.
+The current domain contracts model futures assets generically. Stablecoin-margined linear futures
+using USDT or USDC remain supported, but they are one supported family rather than the domain
+boundary.
 
-Current allowed capital, collateral, and settlement assets:
+Capital, margin, settlement, quote, collateral, and PnL assets are represented as explicit asset
+symbols. BTC, ETH, BNB, USD, USDT, USDC, and other valid asset symbols may appear in domain
+contracts when the surrounding venue or execution policy supports them.
 
-- USDT
-- USDC
-
-Out of current sprint scope:
-
-- ETH or BTC collateral
-- BNB, SOL, or other non-stable collateral
-- coin-margined futures
-- inverse futures
-- multi-asset collateral
-- portfolio margin
-- implicit USD accounting
-
-USDT and USDC are distinct assets. The system must not assume that `100 USDT` equals `100 USDC`
-without an explicit future conversion or valuation snapshot.
+No implicit conversion is implemented. The system must not assume that `100 USDT` equals
+`100 USDC`, `100 USD`, or any other asset amount without an explicit future conversion or
+valuation snapshot.
 
 ## Boundary Rules
 

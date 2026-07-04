@@ -11,7 +11,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from futures_bot.domain.assets import AssetSymbol, StableCollateralAsset
+from futures_bot.domain.assets import AssetSymbol
 from futures_bot.domain.research import TemporalWindow
 from futures_bot.domain.time import ensure_aware_utc
 
@@ -66,8 +66,10 @@ class ReplayInstrumentRef(BaseModel):
     venue: str
     symbol: str
     market_type: str
-    settlement_asset: StableCollateralAsset
-    quote_asset: StableCollateralAsset | None = None
+    settlement_asset: AssetSymbol
+    quote_asset: AssetSymbol | None = None
+    collateral_asset: AssetSymbol | None = None
+    pnl_asset: AssetSymbol | None = None
     base_asset: str | None = None
 
     @field_validator("venue", "symbol", "market_type")
@@ -75,22 +77,41 @@ class ReplayInstrumentRef(BaseModel):
     def _validate_required_text_fields(cls, value: str) -> str:
         return _validate_required_text(value, "field")
 
-    @field_validator("settlement_asset", "quote_asset", mode="before")
+    @field_validator(
+        "settlement_asset",
+        "quote_asset",
+        "collateral_asset",
+        "pnl_asset",
+        mode="before",
+    )
     @classmethod
-    def _coerce_stable_asset(cls, value: object) -> object:
+    def _coerce_asset_symbol(cls, value: object) -> AssetSymbol | None:
         if value is None:
             return None
         if (
-            isinstance(value, dict)
-            and isinstance(value.get("symbol"), dict)
+            isinstance(value, Mapping)
+            and set(value) == {"symbol"}
+            and isinstance(value.get("symbol"), Mapping)
+            and set(value["symbol"]) == {"value"}
             and isinstance(value["symbol"].get("value"), str)
         ):
-            return StableCollateralAsset(value["symbol"]["value"])
-        if isinstance(value, StableCollateralAsset):
-            return value
-        if isinstance(value, AssetSymbol | str):
-            return StableCollateralAsset(value)
-        raise ValueError("stable collateral asset must be USDT or USDC")
+            return AssetSymbol(value["symbol"]["value"])
+        if isinstance(value, AssetSymbol):
+            return AssetSymbol.model_validate(value.model_dump())
+        if isinstance(value, str):
+            return AssetSymbol(value)
+        if isinstance(value, Mapping):
+            if set(value) != {"value"}:
+                raise ValueError("serialized asset symbol must contain only value")
+            return AssetSymbol.model_validate(dict(value))
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(mode="json")
+            if isinstance(dumped, Mapping):
+                return cls._coerce_asset_symbol(dumped)
+        raise ValueError(
+            "asset symbol must be an AssetSymbol, string, or serialized mapping"
+        )
 
     @field_validator("base_asset")
     @classmethod
@@ -184,7 +205,16 @@ class ReplayInputDataset(BaseModel):
         if not value:
             raise ValueError("instruments must be non-empty")
         keys = [
-            (instrument.venue, instrument.symbol, str(instrument.settlement_asset))
+            (
+                instrument.venue,
+                instrument.symbol,
+                str(instrument.settlement_asset),
+                str(instrument.quote_asset) if instrument.quote_asset is not None else None,
+                str(instrument.collateral_asset)
+                if instrument.collateral_asset is not None
+                else None,
+                str(instrument.pnl_asset) if instrument.pnl_asset is not None else None,
+            )
             for instrument in value
         ]
         if len(set(keys)) != len(keys):
