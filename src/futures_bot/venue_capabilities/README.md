@@ -116,6 +116,38 @@ implementation. This package
 performs no network calls, API polling, filesystem persistence, database writes,
 order submission, cancel, replace, or simulation.
 
+## Venue Descriptor Registry
+
+The venue descriptor registry is deterministic metadata for canonical venue,
+environment, and product-family identity. It models Binance, KuCoin, CoinEx, MEXC,
+and Phemex as known research venues, and may carry deferred entries such as
+YouHodler only as not execution ready pending human review.
+
+A descriptor exists != a venue capability snapshot exists != an official source
+record is accepted != capability readiness is fresh != an execution readiness proof
+is ready != a live venue adapter exists. Venue descriptor support status is separate
+from venue capability readiness, and a known/modelled venue is not a real venue
+submission path.
+
+The registry is not a source of truth for venue rules, fees, filters, leverage,
+liquidation, margin, settlement, or collateral data. Product descriptors name
+families such as linear perpetual, inverse perpetual, coin-margined perpetual, and
+future multi-collateral or portfolio-margin cases without capturing official rule
+payloads or making execution claims.
+
+Source templates are metadata only. They identify the kind of official docs, API
+reference, official export, manual official import, or human review note that must
+be captured or imported later through provenance-aware workflows. A source template
+does not fetch anything, does not contain an official payload, does not create a
+source record, and does not create a payload hash.
+
+The registry supports the multi-product and multi-collateral doctrine: venue/product
+identity can be represented before all payoff, collateral, valuation, haircut,
+conversion, settlement, funding, fee, depth, latency, liquidation, or leg-risk facts
+are proven. A price gap between Binance and KuCoin is not enough. The registry only
+says both venue/product identities are known or modelled; economic exposure
+comparability and all execution-risk layers remain future work.
+
 NEEDS_HUMAN_REVIEW before execution: venue-specific asset semantics for Binance,
 KuCoin, CoinEx, MEXC, and Phemex; official inverse and coin-margined contract
 formulas; official portfolio-margin formulas; collateral haircut rules; conversion

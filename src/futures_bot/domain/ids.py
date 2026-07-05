@@ -261,6 +261,22 @@ class VenueCapabilityResolutionDecisionId(DomainId):
     pass
 
 
+class VenueDescriptorId(DomainId):
+    pass
+
+
+class VenueProductDescriptorId(DomainId):
+    pass
+
+
+class VenueSourceTemplateId(DomainId):
+    pass
+
+
+class VenueRegistrySnapshotId(DomainId):
+    pass
+
+
 class VenueCapabilityResolutionGatewayId(DomainId):
     pass
 

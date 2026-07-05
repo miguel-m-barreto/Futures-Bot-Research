@@ -633,6 +633,66 @@ def test_venue_asset_semantics_no_hardcoded_stablecoin_only_execution_assumption
             assert phrase not in source, f"found {phrase!r} in {path.name}"
 
 
+def test_venue_registry_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/venue_registry.py",
+        ROOT / "src/futures_bot/ports/venue_registry.py",
+        ROOT / "src/futures_bot/venue_capabilities/registry.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "open(",
+        "write_text",
+        "read_text",
+        "API key",
+        "api_key",
+        "adapter",
+        "ExchangeAdapter",
+        "CapabilitySnapshot(",
+        "SourceRecord(",
+        "payload_hash",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_venue_registry_readme_documents_descriptor_boundary() -> None:
+    readme = (
+        ROOT / "src/futures_bot/venue_capabilities" / ("README." + "md")
+    ).read_text(encoding="utf-8")
+
+    assert "Venue Descriptor Registry" in readme
+    assert "descriptor exists" in readme
+    assert "capability readiness" in readme
+    assert "execution readiness proof" in readme
+    assert "real venue submission" in readme
+
+
 def test_replay_artifact_fingerprint_source_does_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/replay/integrity.py",
