@@ -4,9 +4,12 @@ from futures_bot.domain.execution_manager import (
     ExecutionAdmissionDecision,
     ExecutionCoordinatorEvent,
 )
+from futures_bot.domain.execution_readiness import ExecutionReadinessProof
 from futures_bot.domain.ids import (
+    ClientOrderId,
     ExecutionAdmissionDecisionId,
     ExecutionCoordinatorEventId,
+    ExecutionReadinessProofId,
 )
 
 
@@ -60,6 +63,54 @@ class InMemoryExecutionCoordinatorEventStore:
         event_id: ExecutionCoordinatorEventId,
     ) -> ExecutionCoordinatorEvent | None:
         return self._events_by_id.get(str(event_id))
+
+
+class InMemoryExecutionReadinessProofStore:
+    """Deterministic readiness proof store test double."""
+
+    def __init__(self) -> None:
+        self._proofs_by_id: dict[str, ExecutionReadinessProof] = {}
+        self._proof_ids: list[str] = []
+        self._proof_id_by_client_id: dict[str, str] = {}
+
+    def put(self, proof: ExecutionReadinessProof) -> None:
+        if proof.proof_id is None:
+            raise ValueError("proof_id is required")
+        key = str(proof.proof_id)
+        existing = self._proofs_by_id.get(key)
+        if existing is not None:
+            if existing != proof:
+                raise ValueError("execution readiness proof id collision")
+            return
+        client_order_id = proof.replacement_client_order_id or proof.client_order_id
+        if client_order_id is not None:
+            client_key = str(client_order_id)
+            existing_proof_id = self._proof_id_by_client_id.get(client_key)
+            if existing_proof_id is not None and existing_proof_id != key:
+                raise ValueError(
+                    "client_order_id is already bound to a different readiness proof"
+                )
+            self._proof_id_by_client_id[client_key] = key
+        self._proofs_by_id[key] = proof
+        self._proof_ids.append(key)
+
+    def get(
+        self,
+        proof_id: ExecutionReadinessProofId,
+    ) -> ExecutionReadinessProof | None:
+        return self._proofs_by_id.get(str(proof_id))
+
+    def get_by_client_order_id(
+        self,
+        client_order_id: ClientOrderId,
+    ) -> ExecutionReadinessProof | None:
+        proof_id = self._proof_id_by_client_id.get(str(client_order_id))
+        if proof_id is None:
+            return None
+        return self._proofs_by_id[proof_id]
+
+    def list_proofs(self) -> tuple[ExecutionReadinessProof, ...]:
+        return tuple(self._proofs_by_id[proof_id] for proof_id in self._proof_ids)
 
 
 def _put_idempotent[T](

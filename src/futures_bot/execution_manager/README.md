@@ -44,6 +44,19 @@ Passing capability validation means the order is locally accepted
 the venue. The `SUBMITTED_TO_VENUE` state and beyond remain intentionally
 deferred.
 
+Accepted local order records carry a deterministic readiness proof ID. The proof
+is immutable local evidence for the admission decision only: it records which
+runtime permission, venue capability, freshness, source provenance,
+asset-semantics, idempotency, and replace-scope/target gates were passed or not
+required. It is not venue submission, fill evidence, ledger/accounting evidence,
+or strategy confidence.
+
+When venue capability validation is required, accepted records must link to a
+proof whose venue capability gate passed. When fresh capability snapshots are
+required, accepted records must link to a proof whose freshness gate passed.
+When source provenance readiness is supplied or required by the request, the
+proof preserves that provenance readiness evidence.
+
 ## Cancel does not require capability validation
 
 `CancelOrderIntent` admission does not require venue capability validation in

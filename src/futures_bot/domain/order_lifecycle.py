@@ -16,6 +16,7 @@ from futures_bot.domain.ids import (
     ClientOrderId,
     DecisionStackRuntimeId,
     ExecutionOrderRecordId,
+    ExecutionReadinessProofId,
     ExecutionReconciliationId,
     FillReportId,
     OrderIdempotencyKey,
@@ -353,6 +354,7 @@ class ExecutionOrderRecord(BaseModel):
     remaining_quantity: Decimal | None = None
     average_fill_price: Decimal | None = None
     last_lifecycle_event_id: OrderLifecycleEventId | None = None
+    readiness_proof_id: ExecutionReadinessProofId | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -392,6 +394,11 @@ class ExecutionOrderRecord(BaseModel):
             raise ValueError("average_fill_price must be > 0")
         if self.client_order_id != self.order_intent.client_order_id:
             raise ValueError("client_order_id must equal order_intent.client_order_id")
+        if (
+            self.lifecycle_state is OrderLifecycleState.ACCEPTED_BY_EXECUTION
+            and self.readiness_proof_id is None
+        ):
+            raise ValueError("ACCEPTED_BY_EXECUTION records require readiness_proof_id")
         return self
 
 

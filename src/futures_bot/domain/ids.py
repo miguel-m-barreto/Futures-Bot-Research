@@ -137,6 +137,18 @@ class ExecutionAdmissionDecisionId(DomainId):
     pass
 
 
+class ExecutionReadinessProofId(DomainId):
+    pass
+
+
+class ExecutionReadinessDecisionId(DomainId):
+    pass
+
+
+class ExecutionReadinessStoreId(DomainId):
+    pass
+
+
 class ExecutionCoordinatorRunId(DomainId):
     pass
 

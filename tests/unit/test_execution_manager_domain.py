@@ -98,6 +98,30 @@ def test_execution_admission_request_deterministic_request_id() -> None:
     assert first.request_id == second.request_id
 
 
+def test_execution_admission_request_source_provenance_passed_requires_checked() -> None:
+    with pytest.raises(ValidationError, match="source_provenance_passed=True"):
+        ExecutionAdmissionRequest(
+            request_kind=ExecutionAdmissionRequestKind.ORDER_INTENT,
+            order_intent=_entry(),
+            order_flow_permission=_permission(),
+            source_provenance_passed=True,
+            requested_at=NOW,
+            requested_by="unit-test",
+        )
+
+
+def test_execution_admission_request_source_provenance_required_requires_checked() -> None:
+    with pytest.raises(ValidationError, match="source_provenance_required=True"):
+        ExecutionAdmissionRequest(
+            request_kind=ExecutionAdmissionRequestKind.ORDER_INTENT,
+            order_intent=_entry(),
+            order_flow_permission=_permission(),
+            source_provenance_required=True,
+            requested_at=NOW,
+            requested_by="unit-test",
+        )
+
+
 def test_execution_admission_decision_accepted_reason_consistency() -> None:
     request = _request()
     assert request.request_id is not None
@@ -125,6 +149,36 @@ def test_execution_admission_decision_accepted_reason_consistency() -> None:
             request_kind=request.request_kind,
             accepted=False,
             reason=ExecutionAdmissionDecisionReason.ACCEPTED,
+            decided_at=NOW,
+        )
+
+
+def test_source_provenance_rejection_decision_preserves_reason_and_details() -> None:
+    request = _request()
+    assert request.request_id is not None
+    decision = ExecutionAdmissionDecision(
+        request_id=request.request_id,
+        request_kind=request.request_kind,
+        accepted=False,
+        reason=ExecutionAdmissionDecisionReason.REJECTED_BY_SOURCE_PROVENANCE,
+        source_provenance_checked=True,
+        source_provenance_passed=False,
+        source_provenance_reason="SOURCE_RECORD_NOT_ACCEPTED",
+        source_provenance_details={"bad": True},
+        decided_at=NOW,
+    )
+
+    assert decision.source_provenance_reason == "SOURCE_RECORD_NOT_ACCEPTED"
+    assert decision.source_provenance_details == {"bad": True}
+
+    with pytest.raises(ValidationError, match="source_provenance_checked=True"):
+        ExecutionAdmissionDecision(
+            request_id=request.request_id,
+            request_kind=request.request_kind,
+            accepted=False,
+            reason=ExecutionAdmissionDecisionReason.REJECTED_BY_SOURCE_PROVENANCE,
+            source_provenance_checked=False,
+            source_provenance_passed=False,
             decided_at=NOW,
         )
 

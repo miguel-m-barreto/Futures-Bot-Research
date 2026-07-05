@@ -18,6 +18,7 @@ from futures_bot.domain.ids import (
     ExecutionAdmissionRequestId,
     ExecutionCoordinatorEventId,
     ExecutionOrderRecordId,
+    ExecutionReadinessProofId,
     ExecutionReconciliationId,
     OrderIntentId,
     OrderLifecycleEventId,
@@ -44,6 +45,7 @@ class ExecutionAdmissionDecisionReason(StrEnum):
     ACCEPTED = "ACCEPTED"
     REJECTED_BY_PERMISSION = "REJECTED_BY_PERMISSION"
     REJECTED_BY_VALIDATION = "REJECTED_BY_VALIDATION"
+    REJECTED_BY_SOURCE_PROVENANCE = "REJECTED_BY_SOURCE_PROVENANCE"
     REJECTED_BY_VENUE_CAPABILITY = "REJECTED_BY_VENUE_CAPABILITY"
     REJECTED_BY_CAPABILITY_FRESHNESS = "REJECTED_BY_CAPABILITY_FRESHNESS"
     VENUE_CAPABILITY_CONTEXT_REQUIRED = "VENUE_CAPABILITY_CONTEXT_REQUIRED"
@@ -81,6 +83,11 @@ class ExecutionAdmissionRequest(BaseModel):
     freshness_check: VenueCapabilityFreshnessCheck | None = None
     require_venue_capability_validation: bool = False
     require_fresh_capability_snapshot: bool = False
+    source_provenance_required: bool = False
+    source_provenance_checked: bool = False
+    source_provenance_passed: bool = False
+    source_provenance_reason: str | None = None
+    source_provenance_details: Any = None
     requested_at: datetime
     requested_by: str
     correlation_id: str | None = None
@@ -90,62 +97,103 @@ class ExecutionAdmissionRequest(BaseModel):
     def _validate_requested_at(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
 
-    @field_validator("requested_by", "correlation_id")
+    @field_validator("requested_by", "correlation_id", "source_provenance_reason")
     @classmethod
     def _validate_text(cls, value: str | None) -> str | None:
         return None if value is None else _trimmed(value, "execution request text")
 
+    @field_validator("source_provenance_details")
+    @classmethod
+    def _validate_source_provenance_details(cls, value: Any) -> Any:
+        if value is not None:
+            _canonical_json_bytes(value)
+        return value
+
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
-        present = tuple(
-            intent
-            for intent in (self.order_intent, self.cancel_intent, self.replace_intent)
-            if intent is not None
-        )
-        if len(present) != 1:
+        if len(_present_execution_intents(self)) != 1:
             raise ValueError("exactly one execution intent must be present")
+        _validate_source_provenance_request_fields(self)
         if self.request_kind is ExecutionAdmissionRequestKind.ORDER_INTENT:
-            if self.order_intent is None:
-                raise ValueError("ORDER_INTENT request requires order_intent")
-            if self.require_venue_capability_validation and self.venue_validation_context is None:
-                raise ValueError(
-                    "ORDER_INTENT with require_venue_capability_validation=True"
-                    " requires venue_validation_context"
-                )
-            if (
-                self.require_venue_capability_validation
-                and self.require_fresh_capability_snapshot
-                and self.freshness_check is None
-            ):
-                raise ValueError(
-                    "ORDER_INTENT with require_fresh_capability_snapshot=True"
-                    " requires freshness_check"
-                )
+            _validate_order_admission_request(self)
         elif self.request_kind is ExecutionAdmissionRequestKind.CANCEL_INTENT:
-            if self.cancel_intent is None:
-                raise ValueError("CANCEL_INTENT request requires cancel_intent")
+            _validate_cancel_admission_request(self)
         else:
-            if self.replace_intent is None:
-                raise ValueError("REPLACE_INTENT request requires replace_intent")
-            if self.require_venue_capability_validation and self.venue_validation_context is None:
-                raise ValueError(
-                    "REPLACE_INTENT with require_venue_capability_validation=True"
-                    " requires venue_validation_context"
-                )
-            if (
-                self.require_venue_capability_validation
-                and self.require_fresh_capability_snapshot
-                and self.freshness_check is None
-            ):
-                raise ValueError(
-                    "REPLACE_INTENT with require_fresh_capability_snapshot=True"
-                    " requires freshness_check"
-                )
+            _validate_replace_admission_request(self)
         expected = deterministic_execution_admission_request_id(self)
         if self.request_id is not None and self.request_id != expected:
             raise ValueError("request_id is not deterministic")
         object.__setattr__(self, "request_id", expected)
         return self
+
+
+def _present_execution_intents(
+    request: ExecutionAdmissionRequest,
+) -> tuple[OrderIntent | CancelOrderIntent | ReplaceOrderIntent, ...]:
+    return tuple(
+        intent
+        for intent in (request.order_intent, request.cancel_intent, request.replace_intent)
+        if intent is not None
+    )
+
+
+def _validate_source_provenance_request_fields(
+    request: ExecutionAdmissionRequest,
+) -> None:
+    if request.source_provenance_passed and not request.source_provenance_checked:
+        raise ValueError(
+            "source_provenance_passed=True requires source_provenance_checked=True"
+        )
+    if request.source_provenance_required and not request.source_provenance_checked:
+        raise ValueError(
+            "source_provenance_required=True requires source_provenance_checked=True"
+        )
+
+
+def _validate_order_admission_request(request: ExecutionAdmissionRequest) -> None:
+    if request.order_intent is None:
+        raise ValueError("ORDER_INTENT request requires order_intent")
+    if _requires_capability_context(request) and request.venue_validation_context is None:
+        raise ValueError(
+            "ORDER_INTENT with require_venue_capability_validation=True"
+            " requires venue_validation_context"
+        )
+    if _requires_freshness_context(request) and request.freshness_check is None:
+        raise ValueError(
+            "ORDER_INTENT with require_fresh_capability_snapshot=True"
+            " requires freshness_check"
+        )
+
+
+def _validate_cancel_admission_request(request: ExecutionAdmissionRequest) -> None:
+    if request.cancel_intent is None:
+        raise ValueError("CANCEL_INTENT request requires cancel_intent")
+
+
+def _validate_replace_admission_request(request: ExecutionAdmissionRequest) -> None:
+    if request.replace_intent is None:
+        raise ValueError("REPLACE_INTENT request requires replace_intent")
+    if _requires_capability_context(request) and request.venue_validation_context is None:
+        raise ValueError(
+            "REPLACE_INTENT with require_venue_capability_validation=True"
+            " requires venue_validation_context"
+        )
+    if _requires_freshness_context(request) and request.freshness_check is None:
+        raise ValueError(
+            "REPLACE_INTENT with require_fresh_capability_snapshot=True"
+            " requires freshness_check"
+        )
+
+
+def _requires_capability_context(request: ExecutionAdmissionRequest) -> bool:
+    return request.require_venue_capability_validation
+
+
+def _requires_freshness_context(request: ExecutionAdmissionRequest) -> bool:
+    return (
+        request.require_venue_capability_validation
+        and request.require_fresh_capability_snapshot
+    )
 
 
 class ExecutionAdmissionDecision(BaseModel):
@@ -168,6 +216,13 @@ class ExecutionAdmissionDecision(BaseModel):
     freshness_reason: str | None = None
     freshness_details: Any = None
     freshness_checked: bool = False
+    source_provenance_checked: bool = False
+    source_provenance_passed: bool = False
+    source_provenance_reason: str | None = None
+    source_provenance_details: Any = None
+    readiness_proof_id: ExecutionReadinessProofId | None = None
+    readiness_ready: bool | None = None
+    readiness_reason: str | None = None
     decided_at: datetime
 
     @field_validator("decided_at")
@@ -175,12 +230,21 @@ class ExecutionAdmissionDecision(BaseModel):
     def _validate_decided_at(cls, value: datetime) -> datetime:
         return ensure_aware_utc(value)
 
-    @field_validator("venue_validation_details", "freshness_details")
+    @field_validator(
+        "venue_validation_details",
+        "freshness_details",
+        "source_provenance_details",
+    )
     @classmethod
     def _validate_venue_validation_details(cls, value: Any) -> Any:
         if value is not None:
             _canonical_json_bytes(value)
         return value
+
+    @field_validator("readiness_reason", "source_provenance_reason")
+    @classmethod
+    def _validate_readiness_reason(cls, value: str | None) -> str | None:
+        return None if value is None else _trimmed(value, "readiness reason")
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> Self:
@@ -206,6 +270,15 @@ class ExecutionAdmissionDecision(BaseModel):
             raise ValueError(
                 "REJECTED_BY_CAPABILITY_FRESHNESS decisions must include freshness_reason"
             )
+        if self.reason is ExecutionAdmissionDecisionReason.REJECTED_BY_SOURCE_PROVENANCE:
+            if not self.source_provenance_checked:
+                raise ValueError(
+                    "REJECTED_BY_SOURCE_PROVENANCE requires source_provenance_checked=True"
+                )
+            if self.source_provenance_passed:
+                raise ValueError(
+                    "REJECTED_BY_SOURCE_PROVENANCE requires source_provenance_passed=False"
+                )
         expected = deterministic_execution_admission_decision_id(self)
         if self.decision_id is not None and self.decision_id != expected:
             raise ValueError("decision_id is not deterministic")

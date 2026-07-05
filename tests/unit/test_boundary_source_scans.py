@@ -1658,3 +1658,58 @@ def test_review_120_plr0913_regression_uses_scoped_resolution_waiver() -> None:
         "# noqa: PLR0911",
         "",
     )
+
+
+def test_execution_readiness_modules_do_not_import_external_infra_or_runtime() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/execution_readiness.py",
+        ROOT / "src/futures_bot/ports/execution_readiness.py",
+        ROOT / "src/futures_bot/execution_manager/readiness.py",
+        ROOT / "src/futures_bot/execution_manager/in_memory.py",
+        ROOT / "src/futures_bot/execution_manager/coordinator.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "ExecutionSimulator",
+        "MatchingEngine",
+        "LedgerMutation",
+        "ExchangeAdapter",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_execution_coordinator_accepted_records_attach_readiness_proof_id() -> None:
+    source = (ROOT / "src/futures_bot/execution_manager/coordinator.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "build_order_execution_readiness_proof" in source
+    assert "build_replace_execution_readiness_proof" in source
+    assert "readiness_proof_id=readiness_proof.proof_id" in source
+    assert "ACCEPTED_BY_EXECUTION" in source
