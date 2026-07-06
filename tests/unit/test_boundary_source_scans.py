@@ -633,6 +633,73 @@ def test_venue_asset_semantics_no_hardcoded_stablecoin_only_execution_assumption
             assert phrase not in source, f"found {phrase!r} in {path.name}"
 
 
+def test_collateral_valuation_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/collateral_valuation.py",
+        ROOT / "src/futures_bot/ports/collateral_valuation.py",
+        ROOT / "src/futures_bot/collateral_valuation/in_memory.py",
+        ROOT / "src/futures_bot/collateral_valuation/policies.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "threading",
+        "asyncio",
+        "subprocess",
+        "sleep",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "open(",
+        "write_text",
+        "read_text",
+        "API key",
+        "api_key",
+        "ExchangeAdapter",
+        "ExecutionSimulator",
+        "MatchingEngine",
+        "LedgerMutation",
+        "liquidation",
+        "Strategy",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_collateral_valuation_no_hardcoded_stablecoin_only_policy() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/collateral_valuation.py",
+        ROOT / "src/futures_bot/collateral_valuation/policies.py",
+    )
+    forbidden_phrases = (
+        "collateral asset must be USDT or USDC",
+        "stablecoin-only",
+        "stablecoin collateral only",
+        "non-stable collateral is ready by default",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"found {phrase!r} in {path.name}"
+
+
 def test_venue_registry_source_files_do_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/venue_registry.py",

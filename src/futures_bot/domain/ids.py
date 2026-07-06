@@ -249,6 +249,26 @@ class CollateralValuationPolicyId(DomainId):
     pass
 
 
+class CollateralValuationSnapshotId(DomainId):
+    pass
+
+
+class CollateralHaircutRuleId(DomainId):
+    pass
+
+
+class CollateralValuationDecisionId(DomainId):
+    pass
+
+
+class CollateralEligibilityRuleId(DomainId):
+    pass
+
+
+class CollateralValuationSourceId(DomainId):
+    pass
+
+
 class VenueCapabilitySourceHealthRecordId(DomainId):
     pass
 

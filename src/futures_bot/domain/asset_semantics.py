@@ -11,6 +11,10 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from futures_bot.domain.collateral_valuation import (
+    CollateralValuationDecisionReason,
+    CollateralValuationReadinessDecision,
+)
 from futures_bot.domain.ids import (
     AssetSemanticsId,
     AssetSymbolId,
@@ -339,6 +343,38 @@ def validate_contract_asset_semantics_readiness(
     )
 
 
+def validate_contract_asset_semantics_collateral_readiness(
+    semantics: ContractAssetSemantics,
+    collateral_decisions: Sequence[CollateralValuationReadinessDecision] | None = None,
+) -> ContractAssetSemanticsReadinessDecision:
+    if collateral_decisions is None:
+        return validate_contract_asset_semantics_readiness(semantics)
+    valuation_requirements = _valuation_requirements(semantics)
+    reason = _readiness_reason_with_collateral_decisions(
+        semantics,
+        tuple(collateral_decisions),
+    )
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=valuation_requirements,
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "collateral_decision_ids": tuple(
+                str(decision.decision_id)
+                for decision in collateral_decisions
+                if decision.decision_id is not None
+            ),
+        },
+    )
+
+
 def compare_cross_venue_economic_exposures(
     left: EconomicExposureDescriptor,
     right: EconomicExposureDescriptor,
@@ -452,6 +488,95 @@ def _readiness_reason(
         if failed:
             return reason
     return AssetSemanticsReadinessReason.READY
+
+
+def _readiness_reason_with_collateral_decisions(
+    semantics: ContractAssetSemantics,
+    collateral_decisions: Sequence[CollateralValuationReadinessDecision],
+) -> AssetSemanticsReadinessReason:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        return base_reason
+    if semantics.requires_collateral_valuation and not _collateral_valuation_ready(
+        semantics,
+        collateral_decisions,
+    ):
+        return AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    if semantics.requires_haircut_rules and not _collateral_haircuts_ready(
+        semantics,
+        collateral_decisions,
+    ):
+        return AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    if semantics.requires_conversion_rules:
+        return AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    if _objective_valuation_is_missing(semantics):
+        return AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    return AssetSemanticsReadinessReason.READY
+
+
+def _readiness_reason_for_semantic_shape(
+    semantics: ContractAssetSemantics,
+) -> AssetSemanticsReadinessReason:
+    checks = (
+        (
+            any(
+                asset.asset_class is AssetClass.UNKNOWN
+                for asset in _all_semantic_assets(semantics)
+            ),
+            AssetSemanticsReadinessReason.ASSET_MISSING,
+        ),
+        (
+            semantics.payoff_kind is ContractPayoffKind.UNKNOWN,
+            AssetSemanticsReadinessReason.PAYOFF_KIND_UNKNOWN,
+        ),
+        (
+            semantics.collateral_mode is CollateralMode.UNKNOWN,
+            AssetSemanticsReadinessReason.COLLATERAL_MODE_UNKNOWN,
+        ),
+        (
+            semantics.settlement_mode is SettlementMode.UNKNOWN,
+            AssetSemanticsReadinessReason.SETTLEMENT_MODE_UNKNOWN,
+        ),
+    )
+    for failed, reason in checks:
+        if failed:
+            return reason
+    return AssetSemanticsReadinessReason.READY
+
+
+def _collateral_valuation_ready(
+    semantics: ContractAssetSemantics,
+    collateral_decisions: Sequence[CollateralValuationReadinessDecision],
+) -> bool:
+    decisions_by_asset = {
+        str(decision.collateral_asset): decision for decision in collateral_decisions
+    }
+    reference_asset = _asset_key(semantics.valuation_reference_asset)
+    for collateral_asset in semantics.collateral_assets:
+        decision = decisions_by_asset.get(_asset_key(collateral_asset))
+        if decision is None:
+            return False
+        if not decision.ready or decision.reason is not CollateralValuationDecisionReason.READY:
+            return False
+        if str(decision.reference_asset) != reference_asset:
+            return False
+    return True
+
+
+def _collateral_haircuts_ready(
+    semantics: ContractAssetSemantics,
+    collateral_decisions: Sequence[CollateralValuationReadinessDecision],
+) -> bool:
+    if not _collateral_valuation_ready(semantics, collateral_decisions):
+        return False
+    decisions_by_asset = {
+        str(decision.collateral_asset): decision for decision in collateral_decisions
+    }
+    for collateral_asset in semantics.collateral_assets:
+        decision = decisions_by_asset.get(_asset_key(collateral_asset))
+        if decision is None or decision.haircut_rule is None:
+            return False
+    return True
 
 
 def _objective_valuation_is_missing(semantics: ContractAssetSemantics) -> bool:
