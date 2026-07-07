@@ -245,6 +245,18 @@ class ObjectiveAssetPolicyId(DomainId):
     pass
 
 
+class ObjectiveAssetReadinessDecisionId(DomainId):
+    pass
+
+
+class ObjectiveAssetPolicyStoreId(DomainId):
+    pass
+
+
+class ObjectiveAssetMeasurementId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

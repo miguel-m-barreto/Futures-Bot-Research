@@ -23,6 +23,10 @@ from futures_bot.domain.ids import (
     EconomicExposureId,
     ObjectiveAssetPolicyId,
 )
+from futures_bot.domain.objective_assets import (
+    ObjectiveAssetCompatibility,
+    ObjectiveAssetReadinessDecision,
+)
 from futures_bot.domain.time import ensure_aware_utc
 
 
@@ -375,6 +379,51 @@ def validate_contract_asset_semantics_collateral_readiness(
     )
 
 
+def validate_contract_asset_semantics_objective_readiness(
+    semantics: ContractAssetSemantics,
+    objective_decision: ObjectiveAssetReadinessDecision | None,
+) -> ContractAssetSemanticsReadinessDecision:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    objective_matches = _objective_decision_matches(semantics, objective_decision)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        reason = base_reason
+    elif semantics.requires_collateral_valuation:
+        reason = AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    elif semantics.requires_haircut_rules:
+        reason = AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    elif (
+        semantics.requires_conversion_rules
+        and _objective_path_needs_conversion(semantics)
+        and (
+            objective_decision is None
+            or not objective_matches
+            or objective_decision.compatibility is ObjectiveAssetCompatibility.DIRECT_MATCH
+        )
+    ):
+        reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    elif semantics.requires_objective_valuation and not objective_matches:
+        reason = AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    else:
+        reason = AssetSemanticsReadinessReason.READY
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=_valuation_requirements(semantics),
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "objective_decision_id": None
+            if objective_decision is None
+            else str(objective_decision.decision_id),
+        },
+    )
+
+
 def compare_cross_venue_economic_exposures(
     left: EconomicExposureDescriptor,
     right: EconomicExposureDescriptor,
@@ -577,6 +626,47 @@ def _collateral_haircuts_ready(
         if decision is None or decision.haircut_rule is None:
             return False
     return True
+
+
+def _objective_decision_matches(
+    semantics: ContractAssetSemantics,
+    objective_decision: ObjectiveAssetReadinessDecision | None,
+) -> bool:
+    if objective_decision is None or not objective_decision.ready:
+        return False
+    policy_matches = (
+        semantics.objective_asset_policy_id is None
+        or objective_decision.policy_id == semantics.objective_asset_policy_id
+    )
+    objective_matches = (
+        semantics.objective_asset is None
+        or (
+            objective_decision.objective_asset is not None
+            and str(objective_decision.objective_asset)
+            == _asset_key(semantics.objective_asset)
+        )
+    )
+    pnl_matches = (
+        objective_decision.pnl_asset is not None
+        and str(objective_decision.pnl_asset) == _asset_key(semantics.pnl_asset)
+    )
+    settlement_matches = (
+        objective_decision.settlement_asset is not None
+        and str(objective_decision.settlement_asset)
+        == _asset_key(semantics.settlement_asset)
+    )
+    return policy_matches and objective_matches and pnl_matches and settlement_matches
+
+
+def _objective_path_needs_conversion(semantics: ContractAssetSemantics) -> bool:
+    objective_asset = semantics.objective_asset
+    if objective_asset is None:
+        return _asset_key(semantics.pnl_asset) != _asset_key(semantics.settlement_asset)
+    objective_key = _asset_key(objective_asset)
+    return (
+        _asset_key(semantics.pnl_asset) != objective_key
+        or _asset_key(semantics.settlement_asset) != objective_key
+    )
 
 
 def _objective_valuation_is_missing(semantics: ContractAssetSemantics) -> bool:

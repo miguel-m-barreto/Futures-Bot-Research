@@ -41,3 +41,9 @@ Example:
 - KuCoin leg collateralized with ETH
 
 The system cannot compare residual risk across those legs until ETH valuation, ETH haircut rules, and eligibility semantics are known in the intended reference asset.
+
+## Objective Asset Boundary
+
+Collateral valuation does not define what "profit" means. Objective asset policy handles whether PnL, settlement, or collateral outcomes are comparable to a bot objective such as USDT accumulation, BTC accumulation, collateral preservation, or reference-value maximization.
+
+A ready collateral valuation can be evidence for objective readiness, but it does not create implicit conversion and does not make USDT, USD, BTC, or ETH interchangeable.
