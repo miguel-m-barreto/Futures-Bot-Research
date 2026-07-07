@@ -20,6 +20,7 @@ from pydantic import (
 
 from futures_bot.domain.assets import AssetSymbol
 from futures_bot.domain.ids import (
+    AssetConversionReadinessDecisionId,
     CollateralValuationDecisionId,
     ObjectiveAssetMeasurementId,
     ObjectiveAssetPolicyId,
@@ -218,6 +219,7 @@ class ObjectiveAssetReadinessDecision(BaseModel):
     reason: ObjectiveAssetDecisionReason
     compatibility: ObjectiveAssetCompatibility
     valuation_decision_id: ObjectiveAssetMeasurementId | None = None
+    conversion_decision_id: AssetConversionReadinessDecisionId | None = None
     collateral_valuation_decision_id: CollateralValuationDecisionId | None = None
     checked_at: datetime
     details: Any = Field(default_factory=dict)

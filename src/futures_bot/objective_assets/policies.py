@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from futures_bot.domain.asset_conversion import AssetConversionReadinessDecision
 from futures_bot.domain.assets import AssetSymbol
 from futures_bot.domain.collateral_valuation import CollateralValuationReadinessDecision
 from futures_bot.domain.ids import ObjectiveAssetMeasurementId
@@ -25,6 +26,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
     settlement_asset: AssetSymbol | str | None = None,
     collateral_asset: AssetSymbol | str | None = None,
     valuation_decision: Any = None,
+    conversion_decision: AssetConversionReadinessDecision | None = None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None = None,
 ) -> ObjectiveAssetReadinessDecision:
     checked_at = ensure_aware_utc(checked_at)
@@ -42,6 +44,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             reason=ObjectiveAssetDecisionReason.POLICY_DISABLED,
             compatibility=ObjectiveAssetCompatibility.UNKNOWN,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"policy_disabled": True},
         )
@@ -56,6 +59,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             reason=ObjectiveAssetDecisionReason.OBJECTIVE_POLICY_UNKNOWN,
             compatibility=ObjectiveAssetCompatibility.UNKNOWN,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"policy_kind": policy.policy_kind.value},
         )
@@ -70,6 +74,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             reason=ObjectiveAssetDecisionReason.OBJECTIVE_MEASUREMENT_UNKNOWN,
             compatibility=ObjectiveAssetCompatibility.UNKNOWN,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"measurement_mode": policy.measurement_mode.value},
         )
@@ -86,6 +91,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             reason=ObjectiveAssetDecisionReason.COLLATERAL_VALUATION_NOT_READY,
             compatibility=ObjectiveAssetCompatibility.VALUATION_REQUIRED,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"collateral_adjustment_required": True},
         )
@@ -98,6 +104,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             settlement_asset=settlement,
             collateral_asset=collateral,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     if policy.policy_kind is ObjectivePolicyKind.MAXIMIZE_REFERENCE_VALUE:
@@ -108,6 +115,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             settlement_asset=settlement,
             collateral_asset=collateral,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     if policy.policy_kind is ObjectivePolicyKind.PRESERVE_COLLATERAL_ASSET:
@@ -118,6 +126,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             settlement_asset=settlement,
             collateral_asset=collateral,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     if policy.policy_kind is ObjectivePolicyKind.MATCH_SETTLEMENT_ASSET:
@@ -128,6 +137,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
             settlement_asset=settlement,
             collateral_asset=collateral,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     return _decision(
@@ -139,6 +149,7 @@ def evaluate_objective_asset_readiness(  # noqa: PLR0911, PLR0913
         reason=ObjectiveAssetDecisionReason.NOT_READY,
         compatibility=ObjectiveAssetCompatibility.UNKNOWN,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
         details={"policy_kind": policy.policy_kind.value},
     )
@@ -152,6 +163,7 @@ def _evaluate_accumulate(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> ObjectiveAssetReadinessDecision:
     objective = policy.objective_asset
@@ -163,6 +175,7 @@ def _evaluate_accumulate(  # noqa: PLR0913
             settlement_asset=settlement_asset,
             collateral_asset=collateral_asset,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     if policy.allow_direct_asset_match and objective in (pnl_asset, settlement_asset):
@@ -174,6 +187,7 @@ def _evaluate_accumulate(  # noqa: PLR0913
             collateral_asset=collateral_asset,
             compatibility=ObjectiveAssetCompatibility.DIRECT_MATCH,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"objective_asset": str(objective)},
         )
@@ -184,7 +198,10 @@ def _evaluate_accumulate(  # noqa: PLR0913
         settlement_asset=settlement_asset,
         collateral_asset=collateral_asset,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
+        conversion_from_assets=_asset_tuple(pnl_asset, settlement_asset),
+        conversion_to_asset=objective,
         missing_reason=(
             ObjectiveAssetDecisionReason.CONVERSION_REQUIRED
             if policy.conversion_required
@@ -216,6 +233,7 @@ def _evaluate_reference_value(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> ObjectiveAssetReadinessDecision:
     reference = policy.reference_asset
@@ -229,6 +247,7 @@ def _evaluate_reference_value(  # noqa: PLR0913
             reason=ObjectiveAssetDecisionReason.REFERENCE_ASSET_MISMATCH,
             compatibility=ObjectiveAssetCompatibility.UNKNOWN,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"missing": "reference_asset"},
         )
@@ -244,6 +263,7 @@ def _evaluate_reference_value(  # noqa: PLR0913
             collateral_asset=collateral_asset,
             compatibility=ObjectiveAssetCompatibility.DIRECT_MATCH,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"reference_asset": str(reference)},
         )
@@ -254,7 +274,10 @@ def _evaluate_reference_value(  # noqa: PLR0913
         settlement_asset=settlement_asset,
         collateral_asset=collateral_asset,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
+        conversion_from_assets=_asset_tuple(pnl_asset, settlement_asset, collateral_asset),
+        conversion_to_asset=reference,
         missing_reason=ObjectiveAssetDecisionReason.VALUATION_REQUIRED,
         not_ready_reason=ObjectiveAssetDecisionReason.VALUATION_NOT_READY,
         compatibility=ObjectiveAssetCompatibility.VALUATION_REQUIRED,
@@ -274,6 +297,7 @@ def _evaluate_preserve_collateral(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> ObjectiveAssetReadinessDecision:
     objective = policy.objective_asset or collateral_asset
@@ -285,6 +309,7 @@ def _evaluate_preserve_collateral(  # noqa: PLR0913
             settlement_asset=settlement_asset,
             collateral_asset=collateral_asset,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
         )
     if policy.allow_direct_asset_match and objective in (
@@ -300,6 +325,7 @@ def _evaluate_preserve_collateral(  # noqa: PLR0913
             collateral_asset=collateral_asset,
             compatibility=ObjectiveAssetCompatibility.DIRECT_MATCH,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"objective_asset": str(objective)},
         )
@@ -310,7 +336,10 @@ def _evaluate_preserve_collateral(  # noqa: PLR0913
         settlement_asset=settlement_asset,
         collateral_asset=collateral_asset,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
+        conversion_from_assets=_asset_tuple(pnl_asset, settlement_asset),
+        conversion_to_asset=objective,
         missing_reason=ObjectiveAssetDecisionReason.CONVERSION_REQUIRED,
         not_ready_reason=ObjectiveAssetDecisionReason.CONVERSION_NOT_AVAILABLE,
         compatibility=ObjectiveAssetCompatibility.CONVERSION_REQUIRED,
@@ -329,6 +358,7 @@ def _evaluate_match_settlement(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> ObjectiveAssetReadinessDecision:
     if settlement_asset is None:
@@ -341,6 +371,7 @@ def _evaluate_match_settlement(  # noqa: PLR0913
             reason=ObjectiveAssetDecisionReason.SETTLEMENT_ASSET_MISMATCH,
             compatibility=ObjectiveAssetCompatibility.UNKNOWN,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"missing": "settlement_asset"},
         )
@@ -353,6 +384,7 @@ def _evaluate_match_settlement(  # noqa: PLR0913
             collateral_asset=collateral_asset,
             compatibility=ObjectiveAssetCompatibility.DIRECT_MATCH,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={"settlement_asset": str(settlement_asset)},
         )
@@ -366,6 +398,7 @@ def _evaluate_match_settlement(  # noqa: PLR0913
             reason=ObjectiveAssetDecisionReason.SETTLEMENT_ASSET_MISMATCH,
             compatibility=ObjectiveAssetCompatibility.NOT_COMPATIBLE,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details={
                 "pnl_asset": None if pnl_asset is None else str(pnl_asset),
@@ -379,7 +412,10 @@ def _evaluate_match_settlement(  # noqa: PLR0913
         settlement_asset=settlement_asset,
         collateral_asset=collateral_asset,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
+        conversion_from_assets=_asset_tuple(pnl_asset),
+        conversion_to_asset=settlement_asset,
         missing_reason=ObjectiveAssetDecisionReason.CONVERSION_REQUIRED,
         not_ready_reason=ObjectiveAssetDecisionReason.CONVERSION_NOT_AVAILABLE,
         compatibility=ObjectiveAssetCompatibility.CONVERSION_REQUIRED,
@@ -398,12 +434,50 @@ def _explicit_evidence_or_required(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
+    conversion_from_assets: tuple[AssetSymbol, ...],
+    conversion_to_asset: AssetSymbol | None,
     missing_reason: ObjectiveAssetDecisionReason,
     not_ready_reason: ObjectiveAssetDecisionReason,
     compatibility: ObjectiveAssetCompatibility,
     details: dict[str, Any],
 ) -> ObjectiveAssetReadinessDecision:
+    typed_conversion_decision = _typed_conversion_decision(
+        conversion_decision,
+        valuation_decision,
+    )
+    if typed_conversion_decision is not None:
+        if _conversion_decision_supports_path(
+            typed_conversion_decision,
+            from_assets=conversion_from_assets,
+            to_asset=conversion_to_asset,
+        ):
+            return _ready(
+                policy=policy,
+                checked_at=checked_at,
+                pnl_asset=pnl_asset,
+                settlement_asset=settlement_asset,
+                collateral_asset=collateral_asset,
+                compatibility=compatibility,
+                valuation_decision=valuation_decision,
+                conversion_decision=typed_conversion_decision,
+                collateral_valuation_decision=collateral_valuation_decision,
+                details=details,
+            )
+        return _decision(
+            policy=policy,
+            checked_at=checked_at,
+            pnl_asset=pnl_asset,
+            settlement_asset=settlement_asset,
+            collateral_asset=collateral_asset,
+            reason=not_ready_reason,
+            compatibility=compatibility,
+            valuation_decision=valuation_decision,
+            conversion_decision=typed_conversion_decision,
+            collateral_valuation_decision=collateral_valuation_decision,
+            details=details,
+        )
     if collateral_valuation_decision is not None:
         if _collateral_valuation_supports_policy(
             policy=policy,
@@ -418,6 +492,7 @@ def _explicit_evidence_or_required(  # noqa: PLR0913
                 collateral_asset=collateral_asset,
                 compatibility=compatibility,
                 valuation_decision=valuation_decision,
+                conversion_decision=conversion_decision,
                 collateral_valuation_decision=collateral_valuation_decision,
                 details=details,
             )
@@ -435,22 +510,11 @@ def _explicit_evidence_or_required(  # noqa: PLR0913
             reason=reason,
             compatibility=compatibility,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details=details,
         )
     if valuation_decision is not None:
-        if _valuation_ready(valuation_decision):
-            return _ready(
-                policy=policy,
-                checked_at=checked_at,
-                pnl_asset=pnl_asset,
-                settlement_asset=settlement_asset,
-                collateral_asset=collateral_asset,
-                compatibility=compatibility,
-                valuation_decision=valuation_decision,
-                collateral_valuation_decision=collateral_valuation_decision,
-                details=details,
-            )
         return _decision(
             policy=policy,
             checked_at=checked_at,
@@ -460,6 +524,7 @@ def _explicit_evidence_or_required(  # noqa: PLR0913
             reason=not_ready_reason,
             compatibility=compatibility,
             valuation_decision=valuation_decision,
+            conversion_decision=conversion_decision,
             collateral_valuation_decision=collateral_valuation_decision,
             details=details,
         )
@@ -472,6 +537,7 @@ def _explicit_evidence_or_required(  # noqa: PLR0913
         reason=missing_reason,
         compatibility=compatibility,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
         details=details,
     )
@@ -485,6 +551,7 @@ def _missing_objective(  # noqa: PLR0913
     settlement_asset: AssetSymbol | None,
     collateral_asset: AssetSymbol | None,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> ObjectiveAssetReadinessDecision:
     return _decision(
@@ -496,6 +563,7 @@ def _missing_objective(  # noqa: PLR0913
         reason=ObjectiveAssetDecisionReason.OBJECTIVE_ASSET_MISSING,
         compatibility=ObjectiveAssetCompatibility.UNKNOWN,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
         details={"missing": "objective_asset"},
     )
@@ -510,6 +578,7 @@ def _ready(  # noqa: PLR0913
     collateral_asset: AssetSymbol | None,
     compatibility: ObjectiveAssetCompatibility,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
     details: dict[str, Any],
 ) -> ObjectiveAssetReadinessDecision:
@@ -523,6 +592,7 @@ def _ready(  # noqa: PLR0913
         reason=ObjectiveAssetDecisionReason.READY,
         compatibility=compatibility,
         valuation_decision=valuation_decision,
+        conversion_decision=conversion_decision,
         collateral_valuation_decision=collateral_valuation_decision,
         details=details,
     )
@@ -538,6 +608,7 @@ def _decision(  # noqa: PLR0913
     reason: ObjectiveAssetDecisionReason,
     compatibility: ObjectiveAssetCompatibility,
     valuation_decision: Any,
+    conversion_decision: AssetConversionReadinessDecision | None,
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
     details: Any,
     ready: bool = False,
@@ -555,6 +626,9 @@ def _decision(  # noqa: PLR0913
         reason=reason,
         compatibility=compatibility,
         valuation_decision_id=_valuation_decision_id(valuation_decision),
+        conversion_decision_id=(
+            None if conversion_decision is None else conversion_decision.decision_id
+        ),
         collateral_valuation_decision_id=(
             None
             if collateral_valuation_decision is None
@@ -576,10 +650,6 @@ def _asset_or_none(value: AssetSymbol | str | None) -> AssetSymbol | None:
     return value if isinstance(value, AssetSymbol) else AssetSymbol(value)
 
 
-def _valuation_ready(valuation_decision: Any) -> bool:
-    return getattr(valuation_decision, "ready", False) is True
-
-
 def _collateral_ready(
     collateral_valuation_decision: CollateralValuationReadinessDecision | None,
 ) -> bool:
@@ -587,6 +657,39 @@ def _collateral_ready(
         collateral_valuation_decision is not None
         and collateral_valuation_decision.ready
     )
+
+
+def _typed_conversion_decision(
+    conversion_decision: AssetConversionReadinessDecision | None,
+    valuation_decision: Any,
+) -> AssetConversionReadinessDecision | None:
+    if conversion_decision is not None:
+        return conversion_decision
+    if isinstance(valuation_decision, AssetConversionReadinessDecision):
+        return valuation_decision
+    return None
+
+
+def _conversion_decision_supports_path(
+    conversion_decision: AssetConversionReadinessDecision,
+    *,
+    from_assets: tuple[AssetSymbol, ...],
+    to_asset: AssetSymbol | None,
+) -> bool:
+    if not conversion_decision.ready:
+        return False
+    if conversion_decision.from_asset is None or conversion_decision.to_asset is None:
+        return False
+    if to_asset is None or str(conversion_decision.to_asset) != str(to_asset):
+        return False
+    return any(
+        str(conversion_decision.from_asset) == str(source_asset)
+        for source_asset in from_assets
+    )
+
+
+def _asset_tuple(*assets: AssetSymbol | None) -> tuple[AssetSymbol, ...]:
+    return tuple(asset for asset in assets if asset is not None)
 
 
 def _collateral_valuation_supports_policy(

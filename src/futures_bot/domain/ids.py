@@ -257,6 +257,22 @@ class ObjectiveAssetMeasurementId(DomainId):
     pass
 
 
+class AssetConversionRateSnapshotId(DomainId):
+    pass
+
+
+class AssetConversionPolicyId(DomainId):
+    pass
+
+
+class AssetConversionReadinessDecisionId(DomainId):
+    pass
+
+
+class AssetConversionStoreId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

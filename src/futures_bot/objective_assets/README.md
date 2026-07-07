@@ -22,6 +22,8 @@ Objective policies model whether the bot is accumulating native units, maximizin
 
 Reference-value measurement still requires explicit evidence when the outcome asset differs from the reference asset. Collateral-adjusted reference measurement additionally requires a ready collateral valuation decision.
 
+Objective asset mismatches require scoped conversion readiness from the asset being measured into the objective, reference, or settlement asset required by the policy. Unrelated conversion readiness and collateral valuation readiness are not interchangeable evidence.
+
 ## Cross-Venue Comparability
 
 A cross-venue opportunity is not profit unless the economic objective is defined.

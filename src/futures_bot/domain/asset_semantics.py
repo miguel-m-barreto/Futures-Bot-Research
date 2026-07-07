@@ -11,6 +11,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from futures_bot.domain.asset_conversion import AssetConversionReadinessDecision
 from futures_bot.domain.collateral_valuation import (
     CollateralValuationDecisionReason,
     CollateralValuationReadinessDecision,
@@ -397,7 +398,8 @@ def validate_contract_asset_semantics_objective_readiness(
         and (
             objective_decision is None
             or not objective_matches
-            or objective_decision.compatibility is ObjectiveAssetCompatibility.DIRECT_MATCH
+            or objective_decision.compatibility
+            is not ObjectiveAssetCompatibility.CONVERSION_REQUIRED
         )
     ):
         reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
@@ -420,6 +422,47 @@ def validate_contract_asset_semantics_objective_readiness(
             "objective_decision_id": None
             if objective_decision is None
             else str(objective_decision.decision_id),
+        },
+    )
+
+
+def validate_contract_asset_semantics_conversion_readiness(
+    semantics: ContractAssetSemantics,
+    conversion_decision: AssetConversionReadinessDecision | None,
+) -> ContractAssetSemanticsReadinessDecision:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        reason = base_reason
+    elif (
+        not semantics.requires_conversion_rules
+        or not _objective_path_needs_conversion(semantics)
+    ):
+        reason = AssetSemanticsReadinessReason.READY
+    elif not _conversion_decision_matches_semantics(semantics, conversion_decision):
+        reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    elif semantics.requires_collateral_valuation:
+        reason = AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    elif semantics.requires_haircut_rules:
+        reason = AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    elif _objective_valuation_is_missing(semantics):
+        reason = AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    else:
+        reason = AssetSemanticsReadinessReason.READY
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=_valuation_requirements(semantics),
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "conversion_decision_id": None
+            if conversion_decision is None
+            else str(conversion_decision.decision_id),
         },
     )
 
@@ -656,6 +699,27 @@ def _objective_decision_matches(
         == _asset_key(semantics.settlement_asset)
     )
     return policy_matches and objective_matches and pnl_matches and settlement_matches
+
+
+def _conversion_decision_matches_semantics(
+    semantics: ContractAssetSemantics,
+    conversion_decision: AssetConversionReadinessDecision | None,
+) -> bool:
+    if conversion_decision is None or not conversion_decision.ready:
+        return False
+    if conversion_decision.from_asset is None or conversion_decision.to_asset is None:
+        return False
+    required_from, required_to = _required_conversion_path(semantics)
+    return (
+        str(conversion_decision.from_asset) == required_from
+        and str(conversion_decision.to_asset) == required_to
+    )
+
+
+def _required_conversion_path(semantics: ContractAssetSemantics) -> tuple[str, str]:
+    if semantics.objective_asset is not None:
+        return _asset_key(semantics.pnl_asset), _asset_key(semantics.objective_asset)
+    return _asset_key(semantics.pnl_asset), _asset_key(semantics.settlement_asset)
 
 
 def _objective_path_needs_conversion(semantics: ContractAssetSemantics) -> bool:

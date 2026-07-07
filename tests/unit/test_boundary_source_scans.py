@@ -771,6 +771,63 @@ def test_objective_asset_policy_has_no_implicit_stablecoin_or_crypto_equivalence
             assert phrase not in source, f"found {phrase!r} in {path.name}"
 
 
+def test_asset_conversion_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/asset_conversion.py",
+        ROOT / "src/futures_bot/ports/asset_conversion.py",
+        ROOT / "src/futures_bot/asset_conversion/in_memory.py",
+        ROOT / "src/futures_bot/asset_conversion/policies.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "submit_order",
+        "ledger",
+        "strategy",
+        "simulator",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_asset_conversion_has_no_hardcoded_stablecoin_equivalence() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/asset_conversion.py",
+        ROOT / "src/futures_bot/asset_conversion/policies.py",
+    )
+    forbidden_phrases = (
+        "USDT == USD",
+        "USDC == USDT",
+        "stablecoin parity",
+        "stablecoins are equivalent",
+        "default conversion",
+        "implicit conversion",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"found {phrase!r} in {path.name}"
+
+
 def test_venue_registry_source_files_do_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/venue_registry.py",
