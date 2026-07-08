@@ -1,88 +1,19 @@
-# Market Data Boundary
+# Market Data Observation Semantics
 
-Market data represents market facts with explicit provenance.
+Market-data readiness proves that required source-backed observations exist for
+a venue, instrument, observation kind, and checked timestamp.
 
-Raw venue events flow through future venue adapters into typed
-`NormalizedMarketObservation` objects. Source-health monitoring records whether a
-source or stream is live, stale, disconnected, unsupported, or otherwise degraded.
-The pure frame builder then produces a `CrossVenueMarketFrame` for one logical
-instrument and decision time. Replay DecisionStack context may consume
-deterministic replay frames through a lookup boundary. Factual
-`MarketEvidenceSet` generation is a separate frame-derived boundary, and
-DecisionStack evidence integration remains deferred.
+It is not live market data access, order-book reconstruction, slippage
+calculation, strategy alpha, execution readiness, order admission, or
+profitability estimation. Future Kafka, Redis, DB, LiveState, replay, and
+dataset writer code must consume these explicit contracts instead of inventing
+market-data assumptions.
 
-```text
-raw venue events
--> venue adapter
--> NormalizedMarketObservation
--> source-health monitoring
--> CrossVenueMarketFrame
--> MarketEvidenceSet/features
--> replay DecisionStack context lookup
-```
+There is no stale or gapped data acceptance for strict readiness, no implicit
+stablecoin market-data assumption, and no mark/index/last price substitution
+unless an explicit future policy models it. Best bid/ask, spread, depth, mark,
+index, and last-trade observations remain distinct evidence paths.
 
-The source is where data was received from. The venue is where the market or
-quoted product exists. A venue symbol is the venue-native name, while the logical
-instrument is only the normalized pair. The logical pair is not the full tradable
-contract identity.
-
-`MarketObservationId` identifies one normalized ingestion observation, including
-local receive provenance such as receive time, connection identity, reconnect
-generation, and monotonic timestamp. It is not a provider-independent canonical
-source-event deduplication key across reingestion or replay.
-
-Spot, perpetual, delivery future, leveraged-product, reference, and index facts
-remain separate even when they share a logical pair. Observed quotes are not
-guaranteed fill prices. Stale or missing sources are represented as stale or
-missing; they are not silently replaced by another source.
-
-The frame builder does not generate alpha, consensus prices, preferred venues,
-leader venues, lagger venues, fallback prices, or merged books. Lead-lag remains
-a future measured hypothesis, and no venue is assumed to lead permanently.
-
-## Replay Projection
-
-Replay market projection keeps `ReplayInputRecord.payload` in the validated
-`ReplayInputBatch`. `ReplayTimelineEvent` remains a metadata reference to the
-batch, dataset, record, event kind, instrument, event time, sequence, order
-index, and content hash.
-
-`ReplayMarketDataBinding` explicitly maps the legacy replay instrument identity
-to the market-data source and venue-instrument authority. The projection does not
-infer market kind, settlement, collateral, or venue aliases from raw symbols.
-
-`EVENT_TIME_AS_SOURCE_AND_RECEIVED` is deterministic legacy replay behavior:
-source event time and received time both come from the replay record event time,
-engine time is absent, monotonic time is zero, and reconnect generation is zero.
-This does not claim real receive latency and is unsuitable for real latency or
-lead-lag measurement.
-
-Replay market frames are generated in replay timeline order. Same-timestamp
-later events do not enter earlier frames. `LocalReplayMarketFrameLookup` indexes
-the validated `ReplayMarketFrameTimeline` by `(event_id, event_order_index)` and
-returns the exact paired observation/frame projections for a replay event
-boundary. The generic replay runtime and dispatcher remain market-agnostic.
-
-`ReplayDecisionStackHandler` performs the lookup inside the decision handler
-boundary and passes a `ReplayDecisionStackContext` to the DecisionStack. Decision
-outputs store compact context references: market timeline ID, adapter
-fingerprint, projection IDs, frame ID, triggering observation ID, and binding
-authority fingerprint. They do not duplicate the complete market frame or all
-observation payloads in the journal.
-
-The projection does not fabricate source-health state. RiskBehaviorModel,
-HardRiskGate, execution, live APIs, feature pipelines, DecisionStack evidence
-context integration, and replay source-health events remain future boundaries.
-
-## Factual Market Evidence
-
-`MarketEvidenceSet` is factual and frame-derived. It embeds the complete
-`CrossVenueMarketFrame` as derivation authority and emits only direct-field
-items from observation payloads and source-health snapshots. It does not read
-future data and does not fabricate source health when a frame has no
-`source_health`.
-
-No midpoint, spread, basis, lead-lag, imbalance, microprice, or executable-edge
-evidence is calculated yet. `TechnicalEvidence` remains a separate analytical
-contract. Market evidence is not a target, decision, risk verdict, recommended
-side, action, or order.
+Collateral valuation readiness, asset conversion readiness, objective readiness,
+margin/liquidation readiness, execution cost readiness, and market-data
+readiness are separate gates.

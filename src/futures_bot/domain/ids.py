@@ -305,6 +305,22 @@ class ExecutionCostStoreId(DomainId):
     pass
 
 
+class MarketDataObservationSnapshotId(DomainId):
+    pass
+
+
+class MarketDataReadinessPolicyId(DomainId):
+    pass
+
+
+class MarketDataReadinessDecisionId(DomainId):
+    pass
+
+
+class MarketDataStoreId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

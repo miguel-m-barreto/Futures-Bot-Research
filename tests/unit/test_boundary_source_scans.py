@@ -951,6 +951,73 @@ def test_execution_cost_has_no_hardcoded_zero_fee_or_funding_defaults() -> None:
             assert phrase not in source, f"found {phrase!r} in {path.name}"
 
 
+def test_market_data_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/market_data.py",
+        ROOT / "src/futures_bot/ports/market_data.py",
+        ROOT / "src/futures_bot/market_data/in_memory.py",
+        ROOT / "src/futures_bot/market_data/policies.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "asyncio",
+        "threading",
+        "submit_order",
+        "strategy",
+        "simulator",
+        "ledger",
+        "reconstruct",
+        "fetch_live",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_market_data_has_no_hardcoded_substitution_or_stale_acceptance() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/market_data.py",
+        ROOT / "src/futures_bot/market_data/policies.py",
+    )
+    forbidden_phrases = (
+        "USDT == USD",
+        "USDC == USDT",
+        "stablecoin parity",
+        "stablecoins are equivalent",
+        "mark equals index",
+        "last equals mark",
+        "index equals last",
+        "accept stale",
+        "allow stale",
+        "ignore gap",
+        "ignore gaps",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"found {phrase!r} in {path.name}"
+
+
 def test_venue_registry_source_files_do_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/venue_registry.py",

@@ -11,5 +11,5 @@ margin, leverage, risk bracket, or liquidation assumptions.
 There is no implicit stablecoin margin assumption and no generic leverage
 default. Isolated, cross, portfolio, and multi-asset modes are explicit policy
 inputs. Collateral valuation readiness, asset conversion readiness, objective
-readiness, execution cost readiness, and margin/liquidation readiness are
-separate gates.
+readiness, execution cost readiness, market-data readiness, and
+margin/liquidation readiness are separate gates.

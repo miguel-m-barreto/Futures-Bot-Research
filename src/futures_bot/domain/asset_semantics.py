@@ -25,11 +25,16 @@ from futures_bot.domain.ids import (
     EconomicExposureId,
     ExecutionCostPolicyId,
     MarginLiquidationPolicyId,
+    MarketDataReadinessPolicyId,
     ObjectiveAssetPolicyId,
 )
 from futures_bot.domain.margin_liquidation import (
     MarginLiquidationReadinessDecision,
     MarginMode,
+)
+from futures_bot.domain.market_data import (
+    MarketDataObservationKind,
+    MarketDataReadinessDecision,
 )
 from futures_bot.domain.objective_assets import (
     ObjectiveAssetCompatibility,
@@ -105,6 +110,7 @@ class AssetSemanticsReadinessReason(StrEnum):
     MARGIN_RULES_REQUIRED = "MARGIN_RULES_REQUIRED"
     LIQUIDATION_RULES_REQUIRED = "LIQUIDATION_RULES_REQUIRED"
     EXECUTION_COST_RULES_REQUIRED = "EXECUTION_COST_RULES_REQUIRED"
+    MARKET_DATA_RULES_REQUIRED = "MARKET_DATA_RULES_REQUIRED"
     ECONOMIC_EXPOSURE_MISMATCH = "ECONOMIC_EXPOSURE_MISMATCH"
 
 
@@ -208,10 +214,14 @@ class ContractAssetSemantics(BaseModel):
     requires_fee_rules: bool = False
     requires_funding_rules: bool = False
     requires_depth_rules: bool = False
+    requires_market_data_rules: bool = False
+    requires_order_book_depth: bool = False
     collateral_valuation_policy_id: CollateralValuationPolicyId | None = None
     objective_asset_policy_id: ObjectiveAssetPolicyId | None = None
     margin_liquidation_policy_id: MarginLiquidationPolicyId | None = None
     execution_cost_policy_id: ExecutionCostPolicyId | None = None
+    market_data_policy_id: MarketDataReadinessPolicyId | None = None
+    market_data_observation_kind: MarketDataObservationKind | None = None
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     @field_validator("venue_id", "instrument_id")
@@ -574,6 +584,52 @@ def validate_contract_asset_semantics_execution_cost_readiness(
     )
 
 
+def validate_contract_asset_semantics_market_data_readiness(
+    semantics: ContractAssetSemantics,
+    market_data_decision: MarketDataReadinessDecision | None,
+) -> ContractAssetSemanticsReadinessDecision:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        reason = base_reason
+    elif not _market_data_rules_required(semantics):
+        reason = AssetSemanticsReadinessReason.READY
+    elif not _market_data_decision_matches_semantics(semantics, market_data_decision):
+        reason = AssetSemanticsReadinessReason.MARKET_DATA_RULES_REQUIRED
+    elif semantics.requires_collateral_valuation:
+        reason = AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    elif semantics.requires_haircut_rules:
+        reason = AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    elif semantics.requires_conversion_rules:
+        reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    elif _objective_valuation_is_missing(semantics):
+        reason = AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    elif semantics.requires_margin_rules:
+        reason = AssetSemanticsReadinessReason.MARGIN_RULES_REQUIRED
+    elif semantics.requires_liquidation_rules:
+        reason = AssetSemanticsReadinessReason.LIQUIDATION_RULES_REQUIRED
+    elif _execution_cost_rules_required(semantics):
+        reason = AssetSemanticsReadinessReason.EXECUTION_COST_RULES_REQUIRED
+    else:
+        reason = AssetSemanticsReadinessReason.READY
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=_valuation_requirements(semantics),
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "market_data_decision_id": None
+            if market_data_decision is None
+            else str(market_data_decision.decision_id),
+        },
+    )
+
+
 def compare_cross_venue_economic_exposures(
     left: EconomicExposureDescriptor,
     right: EconomicExposureDescriptor,
@@ -907,6 +963,58 @@ def _execution_cost_rules_required(semantics: ContractAssetSemantics) -> bool:
         or semantics.requires_funding_rules
         or semantics.requires_depth_rules
     )
+
+
+def _market_data_decision_matches_semantics(  # noqa: PLR0911
+    semantics: ContractAssetSemantics,
+    market_data_decision: MarketDataReadinessDecision | None,
+) -> bool:
+    if not isinstance(market_data_decision, MarketDataReadinessDecision):
+        return False
+    if not market_data_decision.ready:
+        return False
+    if (
+        market_data_decision.venue_id is None
+        or market_data_decision.venue_id != semantics.venue_id
+    ):
+        return False
+    if (
+        market_data_decision.instrument_id is None
+        or market_data_decision.instrument_id != semantics.instrument_id
+    ):
+        return False
+    if (
+        semantics.market_data_policy_id is not None
+        and market_data_decision.policy_id != semantics.market_data_policy_id
+    ):
+        return False
+    if (
+        semantics.market_data_observation_kind is not None
+        and market_data_decision.observation_kind
+        is not semantics.market_data_observation_kind
+    ):
+        return False
+    if (
+        semantics.requires_order_book_depth
+        and market_data_decision.observation_kind
+        is not MarketDataObservationKind.ORDER_BOOK_DEPTH
+    ):
+        return False
+    if semantics.requires_order_book_depth:
+        if (
+            semantics.depth_reference_asset is None
+            or market_data_decision.depth_reference_asset is None
+        ):
+            return False
+        if str(market_data_decision.depth_reference_asset) != _asset_key(
+            semantics.depth_reference_asset,
+        ):
+            return False
+    return True
+
+
+def _market_data_rules_required(semantics: ContractAssetSemantics) -> bool:
+    return semantics.requires_market_data_rules or semantics.requires_order_book_depth
 
 
 def _required_conversion_path(semantics: ContractAssetSemantics) -> tuple[str, str]:

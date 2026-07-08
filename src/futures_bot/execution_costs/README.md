@@ -13,4 +13,6 @@ assumptions.
 There is no zero-fee default, no ignored-funding default, no implicit
 stablecoin fee/funding assumption, and no generic depth or spread assumption.
 Collateral valuation readiness, asset conversion readiness, objective readiness,
-margin/liquidation readiness, and execution cost readiness are separate gates.
+margin/liquidation readiness, market-data readiness, and execution cost
+readiness are separate gates. Execution cost rules do not prove fresh bid/ask,
+mark, index, last-trade, or order-book observations.

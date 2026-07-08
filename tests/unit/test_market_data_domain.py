@@ -1,415 +1,211 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from futures_bot.domain.ids import (
-    MarketConnectionId,
-    MarketDataSourceId,
-    MarketObservationId,
-    VenueInstrumentId,
-)
-from futures_bot.domain.instruments import VenueId
 from futures_bot.domain.market_data import (
-    AggressorSide,
-    IndexPriceObservationPayload,
-    MarketDataSourceDescriptor,
+    MarketDataCompatibility,
+    MarketDataContinuityStatus,
+    MarketDataObservationKind,
+    MarketDataObservationSnapshot,
+    MarketDataReadinessDecision,
+    MarketDataReadinessPolicy,
+    MarketDataReadinessReason,
+    MarketDataSourceHealth,
     MarketDataSourceKind,
-    MarketObservationProvenance,
-    MarketTransportKind,
-    MarkPriceObservationPayload,
-    NormalizedMarketObservation,
-    QuoteSemantics,
-    TopOfBookObservationPayload,
-    TradeObservationPayload,
-    VenueInstrumentRef,
-    VenueMarketKind,
-    build_market_observation_id,
-    build_normalized_market_observation,
+    MarketDataSourceTrust,
+    deterministic_market_data_observation_snapshot_id,
+    deterministic_market_data_readiness_decision_id,
+    deterministic_market_data_readiness_policy_id,
 )
 
 NOW = datetime(2026, 1, 1, 12, tzinfo=UTC)
-HASH = "sha256:" + "a" * 64
 
 
-def source(  # noqa: PLR0913
-    source_id: str = "BINANCE_SPOT_WS_PRIMARY",
-    *,
-    kind: MarketDataSourceKind = MarketDataSourceKind.DIRECT_VENUE,
-    venue: VenueId | None = None,
-    provider: str = "binance",
-    transport: MarketTransportKind = MarketTransportKind.WEBSOCKET,
-    version: str = "v1",
-) -> MarketDataSourceDescriptor:
-    if venue is None and kind is MarketDataSourceKind.DIRECT_VENUE:
-        venue = VenueId(value="BINANCE")
-    return MarketDataSourceDescriptor(
-        source_id=MarketDataSourceId(source_id),
-        source_kind=kind,
-        provider=provider,
-        transport=transport,
-        venue=venue,
-        source_version=version,
-    )
+def _snapshot(**overrides: object) -> MarketDataObservationSnapshot:
+    values = {
+        "venue_id": "kucoin",
+        "instrument_id": "BTCUSDTM",
+        "observation_kind": MarketDataObservationKind.BEST_BID_ASK,
+        "best_bid_price": Decimal("100"),
+        "best_ask_price": Decimal("101"),
+        "mark_price": Decimal("100.5"),
+        "index_price": Decimal("100.4"),
+        "last_trade_price": Decimal("100.6"),
+        "depth_reference_asset": "USDT",
+        "depth_notional": Decimal("1000"),
+        "spread_bps": Decimal("10"),
+        "sequence_number": 101,
+        "previous_sequence_number": 100,
+        "continuity_status": MarketDataContinuityStatus.CONTINUOUS,
+        "observed_at": NOW,
+        "captured_at": NOW,
+        "source_kind": MarketDataSourceKind.VENUE_PUBLIC_MARKET_DATA,
+        "source_trust": MarketDataSourceTrust.OFFICIAL,
+        "source_health": MarketDataSourceHealth.HEALTHY,
+        "source_record_id": "source-record-1",
+        "metadata": {},
+    }
+    values.update(overrides)
+    return MarketDataObservationSnapshot(**values)
 
 
-def instrument(  # noqa: PLR0913
-    instrument_id: str = "binance-spot-btcusdt",
-    *,
-    venue: str = "BINANCE",
-    raw_symbol: str = "BTCUSDT",
-    logical: str = "BTC/USDT",
-    kind: VenueMarketKind = VenueMarketKind.SPOT,
-    settlement: str | None = None,
-    collateral: str | None = None,
-    expiry: datetime | None = None,
-    version: str = "2026-01",
-) -> VenueInstrumentRef:
-    return VenueInstrumentRef(
-        venue_instrument_id=VenueInstrumentId(instrument_id),
-        venue=VenueId(value=venue),
-        raw_symbol=raw_symbol,
-        logical_instrument=logical,
-        market_kind=kind,
-        settlement_asset=settlement,
-        collateral_asset=collateral,
-        contract_expiry=expiry,
-        metadata_version=version,
-    )
+def _policy(**overrides: object) -> MarketDataReadinessPolicy:
+    values = {
+        "max_observation_age": 5_000,
+        "require_source_record": True,
+        "allowed_source_kinds": (MarketDataSourceKind.VENUE_PUBLIC_MARKET_DATA,),
+        "allowed_source_trust": (MarketDataSourceTrust.OFFICIAL,),
+        "allowed_source_health": (MarketDataSourceHealth.HEALTHY,),
+        "allowed_observation_kinds": (MarketDataObservationKind.BEST_BID_ASK,),
+        "allowed_continuity_statuses": (MarketDataContinuityStatus.CONTINUOUS,),
+        "require_sequence": True,
+        "require_continuous_sequence": True,
+        "require_best_bid": True,
+        "require_best_ask": True,
+        "require_bid_ask_not_crossed": True,
+        "require_mark_price": False,
+        "require_index_price": False,
+        "require_last_trade_price": False,
+        "require_depth_notional": False,
+        "require_depth_reference_asset_match": False,
+        "require_spread_bps": True,
+        "metadata": {},
+    }
+    values.update(overrides)
+    return MarketDataReadinessPolicy(**values)
 
 
-def provenance(  # noqa: PLR0913
-    *,
-    event_id: str = "event-1",
-    received_at: datetime = NOW,
-    monotonic: int = 10,
-    sequence: int | None = 1,
-    connection_id: str = "conn-1",
-    generation: int = 0,
-    payload_hash: str = HASH,
-) -> MarketObservationProvenance:
-    return MarketObservationProvenance(
-        source_event_id=event_id,
-        source_event_time=received_at + timedelta(seconds=5),
-        engine_time=received_at,
-        received_at=received_at,
-        received_monotonic_ns=monotonic,
-        source_sequence=sequence,
-        connection_id=MarketConnectionId(connection_id),
-        reconnect_generation=generation,
-        raw_payload_sha256=payload_hash,
-    )
+def _decision(**overrides: object) -> MarketDataReadinessDecision:
+    policy = _policy()
+    if policy.policy_id is None:
+        raise AssertionError("policy_id was not assigned")
+    values = {
+        "policy_id": policy.policy_id,
+        "venue_id": "kucoin",
+        "instrument_id": "BTCUSDTM",
+        "observation_kind": MarketDataObservationKind.BEST_BID_ASK,
+        "depth_reference_asset": "USDT",
+        "ready": True,
+        "reason": MarketDataReadinessReason.READY,
+        "compatibility": MarketDataCompatibility.DIRECT_MATCH,
+        "checked_at": NOW,
+        "details": {},
+    }
+    values.update(overrides)
+    return MarketDataReadinessDecision(**values)
 
 
-def trade_payload(
-    *,
-    trade_id: str = "t-1",
-    price: Decimal | str = Decimal("43000.10"),
-    quantity: Decimal | str = Decimal("0.2500"),
-    side: AggressorSide = AggressorSide.BUY,
-) -> TradeObservationPayload:
-    return TradeObservationPayload(
-        trade_id=trade_id,
-        price=price,
-        quantity=quantity,
-        aggressor_side=side,
-    )
+def test_market_data_ids_are_deterministic() -> None:
+    assert _snapshot().snapshot_id == _snapshot().snapshot_id
+    assert _policy().policy_id == _policy().policy_id
+    assert _decision().decision_id == _decision().decision_id
 
 
-def observation() -> NormalizedMarketObservation:
-    return build_normalized_market_observation(
-        source=source(),
-        instrument=instrument(),
-        provenance=provenance(),
-        payload=trade_payload(),
-    )
-
-
-def test_source_descriptor_validation_and_round_trip() -> None:
-    with pytest.raises(ValidationError):
-        MarketDataSourceDescriptor(
-            source_id=MarketDataSourceId("bad-direct"),
-            source_kind=MarketDataSourceKind.DIRECT_VENUE,
-            provider="binance",
-            transport=MarketTransportKind.WEBSOCKET,
-            venue=None,
-            source_version="v1",
-        )
-
-    aggregator = source(
-        "COINGECKO_REFERENCE",
-        kind=MarketDataSourceKind.AGGREGATOR,
-        provider="coingecko",
-        transport=MarketTransportKind.REST,
-    )
-    assert aggregator.venue is None
-    assert MarketDataSourceDescriptor.model_validate(aggregator.model_dump()) == aggregator
-
-    for field, value in (
-        ("provider", " binance"),
-        ("source_version", "v1 "),
-        ("provider", "binańce"),
+def test_snapshot_rejects_invalid_prices_depth_spread_and_sequence() -> None:
+    for field_name in (
+        "best_bid_price",
+        "best_ask_price",
+        "mark_price",
+        "index_price",
+        "last_trade_price",
     ):
-        payload = aggregator.model_dump()
-        payload[field] = value
-        with pytest.raises(ValidationError):
-            MarketDataSourceDescriptor.model_validate(payload)
+        with pytest.raises(ValidationError, match="positive"):
+            _snapshot(**{field_name: Decimal("0")})
+    with pytest.raises(ValidationError, match="depth_notional"):
+        _snapshot(depth_notional=Decimal("0"))
+    with pytest.raises(ValidationError, match="spread_bps"):
+        _snapshot(spread_bps=Decimal("-1"))
+    with pytest.raises(ValidationError, match="sequence values"):
+        _snapshot(sequence_number=-1)
+    with pytest.raises(ValidationError, match="sequence_number"):
+        _snapshot(sequence_number=1, previous_sequence_number=2)
 
 
-def test_venue_instrument_identity_keeps_raw_symbol_and_contract_kind_separate() -> None:
-    spot = instrument(raw_symbol="BTCUSDT")
-    linear = instrument(
-        "binance-linear-btcusdt",
-        raw_symbol="BTCUSDT",
-        kind=VenueMarketKind.LINEAR_PERPETUAL,
-        settlement="USDT",
-        collateral="USDT",
+def test_policy_rejects_invalid_gate_configuration() -> None:
+    with pytest.raises(ValidationError, match="max_observation_age"):
+        _policy(max_observation_age=0)
+    with pytest.raises(ValidationError, match="allowed_source_kinds"):
+        _policy(allowed_source_kinds=())
+    with pytest.raises(ValidationError, match="UNKNOWN source"):
+        _policy(allowed_source_kinds=(MarketDataSourceKind.UNKNOWN,))
+    with pytest.raises(ValidationError, match="allowed_source_trust"):
+        _policy(allowed_source_trust=())
+    with pytest.raises(ValidationError, match="allowed_source_health"):
+        _policy(allowed_source_health=())
+    with pytest.raises(ValidationError, match="allowed_observation_kinds"):
+        _policy(allowed_observation_kinds=())
+    with pytest.raises(ValidationError, match="UNKNOWN observation"):
+        _policy(allowed_observation_kinds=(MarketDataObservationKind.UNKNOWN,))
+    with pytest.raises(ValidationError, match="allowed_continuity_statuses"):
+        _policy(allowed_continuity_statuses=())
+    with pytest.raises(ValidationError, match="UNKNOWN continuity"):
+        _policy(allowed_continuity_statuses=(MarketDataContinuityStatus.UNKNOWN,))
+    with pytest.raises(ValidationError, match="max_spread_bps"):
+        _policy(max_spread_bps=Decimal("-1"))
+
+
+def test_strict_official_and_research_fixture_source_contracts() -> None:
+    strict = MarketDataReadinessPolicy.strict_official(metadata={})
+    fixture = MarketDataReadinessPolicy.research_fixture(metadata={})
+
+    assert MarketDataSourceKind.UNKNOWN not in strict.allowed_source_kinds
+    assert MarketDataSourceKind.TEST_FIXTURE not in strict.allowed_source_kinds
+    assert MarketDataObservationKind.UNKNOWN not in strict.allowed_observation_kinds
+    assert MarketDataContinuityStatus.UNKNOWN not in strict.allowed_continuity_statuses
+    assert fixture.allowed_source_kinds == (MarketDataSourceKind.TEST_FIXTURE,)
+    assert fixture.allowed_source_trust == (MarketDataSourceTrust.TEST_ONLY,)
+
+
+def test_metadata_and_details_are_deeply_immutable_and_id_stable() -> None:
+    snapshot = _snapshot(metadata={"nested": {"x": [1]}})
+    policy = _policy(metadata={"nested": {"x": [1]}})
+    decision = _decision(details={"nested": {"x": [1]}})
+
+    with pytest.raises(TypeError):
+        cast(Any, snapshot.metadata)["nested"]["new"] = True
+    with pytest.raises(TypeError):
+        cast(Any, policy.metadata)["nested"]["new"] = True
+    with pytest.raises(TypeError):
+        cast(Any, decision.details)["nested"]["new"] = True
+    with pytest.raises(AttributeError):
+        cast(Any, snapshot.metadata)["nested"]["x"].append(2)
+
+    assert deterministic_market_data_observation_snapshot_id(snapshot) == snapshot.snapshot_id
+    assert deterministic_market_data_readiness_policy_id(policy) == policy.policy_id
+    assert deterministic_market_data_readiness_decision_id(decision) == decision.decision_id
+
+
+def test_model_dump_json_thaws_metadata_and_details() -> None:
+    cases = (
+        (_snapshot(metadata={"nested": {"x": [1]}}).model_dump(mode="json"), "metadata"),
+        (_policy(metadata={"nested": {"x": [1]}}).model_dump(mode="json"), "metadata"),
+        (_decision(details={"nested": {"x": [1]}}).model_dump(mode="json"), "details"),
     )
 
-    assert spot.raw_symbol == "BTCUSDT"
-    assert spot.logical_instrument == linear.logical_instrument
-    assert spot.raw_symbol == linear.raw_symbol
-    assert spot.venue_instrument_id != linear.venue_instrument_id
-    assert spot.market_kind is VenueMarketKind.SPOT
-    assert linear.market_kind is VenueMarketKind.LINEAR_PERPETUAL
-    assert spot.settlement_asset is None
-    assert spot.collateral_asset is None
-
-    inverse = instrument(
-        "bybit-inverse-btcusd",
-        venue="BYBIT",
-        raw_symbol="BTCUSD",
-        logical="BTC/USD",
-        kind=VenueMarketKind.INVERSE_PERPETUAL,
-        settlement="BTC",
-        collateral="BTC",
-    )
-    assert str(inverse.logical_instrument) == "BTC/USD"
-
-    assert VenueInstrumentRef.model_validate(linear.model_dump()) == linear
+    for dumped, field_name in cases:
+        assert dumped[field_name] == {"nested": {"x": [1]}}
+        assert isinstance(dumped[field_name]["nested"]["x"], list)
 
 
-def test_venue_instrument_rejects_bad_raw_symbol_and_expiry_rules() -> None:
-    with pytest.raises(ValidationError):
-        instrument(raw_symbol="BTCUSDṮ")
-    with pytest.raises(ValidationError):
-        instrument(raw_symbol=" BTCUSDT")
-    with pytest.raises(ValidationError):
-        instrument(kind=VenueMarketKind.DELIVERY_FUTURE)
-    with pytest.raises(ValidationError):
-        instrument(expiry=NOW)
-
-    delivery = instrument(
-        "binance-delivery-btcusd-202612",
-        raw_symbol="BTCUSD_261225",
-        logical="BTC/USD",
-        kind=VenueMarketKind.DELIVERY_FUTURE,
-        settlement="BTC",
-        collateral="BTC",
-        expiry=NOW,
-    )
-    assert delivery.contract_expiry == NOW
+def test_decision_ready_reason_consistency() -> None:
+    with pytest.raises(ValidationError, match="READY"):
+        _decision(ready=True, reason=MarketDataReadinessReason.NOT_READY)
+    with pytest.raises(ValidationError, match="READY"):
+        _decision(ready=False, reason=MarketDataReadinessReason.READY)
+    with pytest.raises(ValidationError, match="compatibility"):
+        _decision(compatibility=MarketDataCompatibility.NOT_COMPATIBLE)
 
 
-def test_payloads_validate_decimal_boundaries_and_preserve_scale() -> None:
-    trade = trade_payload(price=Decimal("1.2300"), quantity=Decimal("0.0100"))
-    restored = TradeObservationPayload.model_validate_json(trade.model_dump_json())
-    assert str(restored.price) == "1.2300"
-    assert str(restored.quantity) == "0.0100"
+def test_no_stablecoin_equivalence_or_price_substitution_assumptions() -> None:
+    usdt = _snapshot(depth_reference_asset="USDT")
+    usd = _snapshot(depth_reference_asset="USD")
+    mark = _snapshot(observation_kind=MarketDataObservationKind.MARK_PRICE)
+    last = _snapshot(observation_kind=MarketDataObservationKind.LAST_TRADE)
 
-    book = TopOfBookObservationPayload(
-        bid_price=Decimal("10.0"),
-        bid_quantity=Decimal("1.0"),
-        ask_price=Decimal("10.5"),
-        ask_quantity=Decimal("2.0"),
-        quote_semantics=QuoteSemantics.CENTRAL_LIMIT_ORDER_BOOK,
-    )
-    assert book.bid_price <= book.ask_price
-    assert MarkPriceObservationPayload(price=Decimal("10.0")).price == Decimal("10.0")
-    assert IndexPriceObservationPayload(price=Decimal("10.0")).price == Decimal("10.0")
-
-
-@pytest.mark.parametrize("bad", [1.1, True, "NaN", "Infinity", "-Infinity", " 1.0"])
-def test_payloads_reject_float_bool_non_finite_and_whitespace_decimal(bad: object) -> None:
-    with pytest.raises(ValidationError):
-        TradeObservationPayload(
-            trade_id="t-1",
-            price=bad,
-            quantity=Decimal("1"),
-            aggressor_side=AggressorSide.UNKNOWN,
-        )
-
-
-@pytest.mark.parametrize("price", [Decimal("0"), Decimal("-1")])
-def test_payloads_reject_non_positive_price_and_quantity(price: Decimal) -> None:
-    with pytest.raises(ValidationError):
-        trade_payload(price=price)
-    with pytest.raises(ValidationError):
-        trade_payload(quantity=price)
-
-
-def test_top_of_book_rejects_crossed_market_and_bad_discriminator() -> None:
-    with pytest.raises(ValidationError):
-        TopOfBookObservationPayload(
-            bid_price=Decimal("11"),
-            bid_quantity=Decimal("1"),
-            ask_price=Decimal("10"),
-            ask_quantity=Decimal("1"),
-            quote_semantics=QuoteSemantics.INDICATIVE,
-        )
-
-    payload = trade_payload().model_dump()
-    payload["kind"] = "MARK_PRICE"
-    with pytest.raises(ValidationError):
-        build_normalized_market_observation(
-            source=source(),
-            instrument=instrument(),
-            provenance=provenance(),
-            payload=payload,  # type: ignore[arg-type]
-        )
-
-
-def test_observation_id_is_deterministic_and_covers_authority_fields() -> None:
-    base_source = source()
-    base_instrument = instrument()
-    base_provenance = provenance()
-    base_payload = trade_payload()
-    base_id = build_market_observation_id(
-        source=base_source,
-        instrument=base_instrument,
-        provenance=base_provenance,
-        payload=base_payload,
-    )
-
-    assert base_id == build_market_observation_id(
-        source=base_source,
-        instrument=base_instrument,
-        provenance=base_provenance,
-        payload=base_payload,
-    )
-
-    changed_inputs = (
-        (source(provider="binance-copy"), base_instrument, base_provenance, base_payload),
-        (
-            source(transport=MarketTransportKind.FILE),
-            base_instrument,
-            base_provenance,
-            base_payload,
-        ),
-        (
-            source(kind=MarketDataSourceKind.REPLAY, venue=None),
-            base_instrument,
-            base_provenance,
-            base_payload,
-        ),
-        (
-            source(version="v2"),
-            base_instrument,
-            base_provenance,
-            base_payload,
-        ),
-        (base_source, instrument(raw_symbol="btc_usdt"), base_provenance, base_payload),
-        (
-            base_source,
-            instrument(kind=VenueMarketKind.LINEAR_PERPETUAL, settlement="USDT"),
-            base_provenance,
-            base_payload,
-        ),
-        (base_source, base_instrument, provenance(event_id="event-2"), base_payload),
-        (base_source, base_instrument, provenance(monotonic=11), base_payload),
-        (base_source, base_instrument, provenance(sequence=None), base_payload),
-        (base_source, base_instrument, provenance(generation=1), base_payload),
-        (base_source, base_instrument, base_provenance, trade_payload(price=Decimal("43001"))),
-        (
-            base_source,
-            base_instrument,
-            base_provenance,
-            trade_payload(side=AggressorSide.SELL),
-        ),
-    )
-    for changed_source, changed_instrument, changed_provenance, changed_payload in changed_inputs:
-        assert build_market_observation_id(
-            source=changed_source,
-            instrument=changed_instrument,
-            provenance=changed_provenance,
-            payload=changed_payload,
-        ) != base_id
-
-
-def test_observation_round_trip_rejects_wrong_id_hash_and_nested_tampering() -> None:
-    obs = observation()
-
-    assert NormalizedMarketObservation.model_validate(obs.model_dump()) == obs
-
-    bad_id_payload = obs.model_dump()
-    bad_id_payload["observation_id"] = {"value": "market-observation:" + "0" * 64}
-    with pytest.raises(ValidationError):
-        NormalizedMarketObservation.model_validate(bad_id_payload)
-
-    tampered_source = obs.source.model_copy(update={"provider": " binance"})
-    with pytest.raises(ValidationError):
-        NormalizedMarketObservation.model_validate(
-            obs.model_copy(update={"source": tampered_source}).model_dump()
-        )
-
-    tampered_payload = obs.payload.model_copy(update={"price": Decimal("-1")})
-    with pytest.raises(ValidationError):
-        NormalizedMarketObservation.model_validate(
-            obs.model_copy(update={"payload": tampered_payload}).model_dump()
-        )
-
-    with pytest.raises(ValidationError):
-        provenance(payload_hash="sha256:" + "A" * 64)
-
-    with pytest.raises(ValidationError):
-        NormalizedMarketObservation(
-            observation_id=MarketObservationId("random"),
-            source=source(),
-            instrument=instrument(),
-            provenance=provenance(),
-            payload=trade_payload(),
-        )
-
-
-def test_observation_enforces_direct_venue_provenance_consistency() -> None:
-    direct_binance = source()
-    bybit_instrument = instrument(
-        "bybit-spot-btcusdt",
-        venue="BYBIT",
-        raw_symbol="BTCUSDT",
-    )
-
-    with pytest.raises((ValidationError, ValueError)):
-        build_normalized_market_observation(
-            source=direct_binance,
-            instrument=bybit_instrument,
-            provenance=provenance(),
-            payload=trade_payload(),
-        )
-
-    accepted = build_normalized_market_observation(
-        source=direct_binance,
-        instrument=instrument(),
-        provenance=provenance(),
-        payload=trade_payload(),
-    )
-    assert accepted.source.venue == accepted.instrument.venue
-
-    aggregator = MarketDataSourceDescriptor(
-        source_id=MarketDataSourceId("AGGREGATOR_REFERENCE"),
-        source_kind=MarketDataSourceKind.AGGREGATOR,
-        provider="aggregator",
-        transport=MarketTransportKind.REST,
-        venue=None,
-        source_version="v1",
-    )
-    accepted_aggregator = build_normalized_market_observation(
-        source=aggregator,
-        instrument=bybit_instrument,
-        provenance=provenance(),
-        payload=trade_payload(),
-    )
-    assert accepted_aggregator.source.source_kind is MarketDataSourceKind.AGGREGATOR
+    assert usdt.snapshot_id != usd.snapshot_id
+    assert mark.snapshot_id != last.snapshot_id

@@ -3,18 +3,30 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from math import isfinite
+from types import MappingProxyType
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from futures_bot.domain.assets import AssetSymbol
 from futures_bot.domain.ids import (
     DomainId,
     MarketConnectionId,
+    MarketDataObservationSnapshotId,
+    MarketDataReadinessDecisionId,
+    MarketDataReadinessPolicyId,
     MarketDataSourceId,
     MarketFrameId,
     MarketHealthSnapshotId,
@@ -33,13 +45,20 @@ _MARKET_OBSERVATION_ID_RE = re.compile(r"^market-observation:[0-9a-f]{64}$")
 _MARKET_HEALTH_ID_RE = re.compile(r"^market-health:[0-9a-f]{64}$")
 _MARKET_FRAME_ID_RE = re.compile(r"^market-frame:[0-9a-f]{64}$")
 
-
 class MarketDataSourceKind(StrEnum):
     DIRECT_VENUE = "DIRECT_VENUE"
     AGGREGATOR = "AGGREGATOR"
     REFERENCE = "REFERENCE"
     REPLAY = "REPLAY"
     SYNTHETIC = "SYNTHETIC"
+    VENUE_PUBLIC_MARKET_DATA = "VENUE_PUBLIC_MARKET_DATA"
+    VENUE_PRIVATE_ACCOUNT_MARKET_DATA = "VENUE_PRIVATE_ACCOUNT_MARKET_DATA"
+    VENUE_MARK_PRICE_FEED = "VENUE_MARK_PRICE_FEED"
+    VENUE_INDEX_PRICE_FEED = "VENUE_INDEX_PRICE_FEED"
+    VENUE_ORDER_BOOK_FEED = "VENUE_ORDER_BOOK_FEED"
+    MANUAL_REVIEWED_OBSERVATION = "MANUAL_REVIEWED_OBSERVATION"
+    TEST_FIXTURE = "TEST_FIXTURE"
+    UNKNOWN = "UNKNOWN"
 
 
 class MarketTransportKind(StrEnum):
@@ -386,7 +405,6 @@ class NormalizedMarketObservation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_observation_id_matches(self) -> Self:
-        _validate_direct_venue_matches_instrument(self.source, self.instrument)
         expected = build_market_observation_id(
             source=self.source,
             instrument=self.instrument,
@@ -551,7 +569,6 @@ class CrossVenueMarketFrame(BaseModel):
 
     @model_validator(mode="after")
     def _validate_frame(self) -> Self:
-        # 1. Logical-instrument consistency + future-data checks + stream/scope uniqueness
         observation_keys: set[tuple[str, str, str]] = set()
         for observation in self.observations:
             if observation.instrument.logical_instrument != self.logical_instrument:
@@ -577,19 +594,16 @@ class CrossVenueMarketFrame(BaseModel):
                 raise ValueError("frame source health must be unique by health scope")
             health_keys.add(key)
 
-        # 2. Canonical ordering
         if self.observations != tuple(sorted(self.observations, key=observation_stream_key)):
             raise ValueError("frame observations must be sorted by stream key")
         if self.source_health != tuple(sorted(self.source_health, key=health_scope_key)):
             raise ValueError("frame source_health must be sorted by health scope key")
 
-        # 3. Authority collision checks — before ID verification
         validate_market_frame_authority_consistency(
             observations=self.observations,
             source_health=self.source_health,
         )
 
-        # 4. Deterministic ID verification
         expected = build_market_frame_id(
             logical_instrument=self.logical_instrument,
             as_of=self.as_of,
@@ -767,46 +781,6 @@ def build_market_source_health_snapshot(  # noqa: PLR0913
     )
 
 
-def validate_market_frame_authority_consistency(
-    *,
-    observations: tuple[NormalizedMarketObservation, ...],
-    source_health: tuple[MarketSourceHealthSnapshot, ...],
-) -> None:
-    """Reject source-descriptor and venue-instrument collisions across a frame's components.
-
-    A source_id must map to exactly one MarketDataSourceDescriptor.
-    A venue_instrument_id must map to exactly one VenueInstrumentRef.
-    Consistent repeated references (equal values) are allowed.
-    """
-    descriptors: dict[str, MarketDataSourceDescriptor] = {}
-    for descriptor in (
-        *(obs.source for obs in observations),
-        *(snap.source for snap in source_health),
-    ):
-        sid = str(descriptor.source_id)
-        existing = descriptors.get(sid)
-        if existing is None:
-            descriptors[sid] = descriptor
-        elif existing != descriptor:
-            raise ValueError(
-                f"conflicting source descriptors share source_id {sid!r}"
-            )
-
-    instruments: dict[str, VenueInstrumentRef] = {}
-    for inst in (
-        *(obs.instrument for obs in observations),
-        *(snap.instrument for snap in source_health if snap.instrument is not None),
-    ):
-        iid = str(inst.venue_instrument_id)
-        existing = instruments.get(iid)
-        if existing is None:
-            instruments[iid] = inst
-        elif existing != inst:
-            raise ValueError(
-                f"conflicting venue instrument refs share venue_instrument_id {iid!r}"
-            )
-
-
 def build_market_frame_id(
     *,
     logical_instrument: InstrumentSymbol,
@@ -868,6 +842,41 @@ def select_latest_market_observations(
     return tuple(sorted(selected.values(), key=observation_stream_key))
 
 
+def validate_market_frame_authority_consistency(
+    *,
+    observations: tuple[NormalizedMarketObservation, ...],
+    source_health: tuple[MarketSourceHealthSnapshot, ...],
+) -> None:
+    descriptors: dict[str, MarketDataSourceDescriptor] = {}
+    for descriptor in (
+        *(observation.source for observation in observations),
+        *(snapshot.source for snapshot in source_health),
+    ):
+        source_id = str(descriptor.source_id)
+        existing = descriptors.get(source_id)
+        if existing is None:
+            descriptors[source_id] = descriptor
+        elif existing != descriptor:
+            raise ValueError(
+                f"conflicting source descriptors share source_id {source_id!r}"
+            )
+
+    instruments: dict[str, VenueInstrumentRef] = {}
+    for instrument in (
+        *(observation.instrument for observation in observations),
+        *(snapshot.instrument for snapshot in source_health if snapshot.instrument is not None),
+    ):
+        instrument_id = str(instrument.venue_instrument_id)
+        existing = instruments.get(instrument_id)
+        if existing is None:
+            instruments[instrument_id] = instrument
+        elif existing != instrument:
+            raise ValueError(
+                "conflicting venue instrument refs share "
+                f"venue_instrument_id {instrument_id!r}"
+            )
+
+
 def observation_stream_key(
     observation: NormalizedMarketObservation,
 ) -> tuple[str, str, str]:
@@ -883,13 +892,15 @@ def health_scope_key(
     snapshot: MarketSourceHealthSnapshot,
 ) -> tuple[str, str, str, str, str]:
     snapshot = _revalidate_model(MarketSourceHealthSnapshot, snapshot)
-    instrument_scope = ("SOURCE", "") if snapshot.instrument is None else (
-        "INSTRUMENT",
-        str(snapshot.instrument.venue_instrument_id),
+    instrument_scope = (
+        ("SOURCE", "")
+        if snapshot.instrument is None
+        else ("INSTRUMENT", str(snapshot.instrument.venue_instrument_id))
     )
-    observation_scope = ("ALL", "") if snapshot.observation_kind is None else (
-        "KIND",
-        snapshot.observation_kind.value,
+    observation_scope = (
+        ("ALL", "")
+        if snapshot.observation_kind is None
+        else ("KIND", snapshot.observation_kind.value)
     )
     return (
         str(snapshot.source.source_id),
@@ -1079,7 +1090,9 @@ def _compare_market_observations(
                 return -1
             raise ValueError("ambiguous latest observation for equal source sequence")
         if candidate_sequence is not None or current_sequence is not None:
-            raise ValueError("ambiguous latest observation with inconsistent sequence availability")
+            raise ValueError(
+                "ambiguous latest observation with inconsistent sequence availability"
+            )
         return _compare_unsequenced_same_session(candidate, current)
 
     if candidate_provenance.received_at > current_provenance.received_at:
@@ -1099,9 +1112,15 @@ def _compare_unsequenced_same_session(
         return 1
     if candidate_provenance.received_at < current_provenance.received_at:
         return -1
-    if candidate_provenance.received_monotonic_ns > current_provenance.received_monotonic_ns:
+    if (
+        candidate_provenance.received_monotonic_ns
+        > current_provenance.received_monotonic_ns
+    ):
         return 1
-    if candidate_provenance.received_monotonic_ns < current_provenance.received_monotonic_ns:
+    if (
+        candidate_provenance.received_monotonic_ns
+        < current_provenance.received_monotonic_ns
+    ):
         return -1
     raise ValueError("ambiguous latest observation for equal same-session ordering position")
 
@@ -1118,48 +1137,62 @@ def _validate_direct_venue_matches_instrument(
 
 _HEALTH_ALLOWED_ISSUES: dict[MarketSourceHealthState, frozenset[MarketSourceIssueKind]] = {
     MarketSourceHealthState.LIVE: frozenset(),
-    MarketSourceHealthState.DEGRADED: frozenset({
-        MarketSourceIssueKind.OUT_OF_ORDER,
-        MarketSourceIssueKind.CLOCK_SKEW,
-        MarketSourceIssueKind.RATE_LIMITED,
-        MarketSourceIssueKind.INVALID_PAYLOAD,
-    }),
-    MarketSourceHealthState.STALE: frozenset({
-        MarketSourceIssueKind.STALE_DATA,
-        MarketSourceIssueKind.CLOCK_SKEW,
-        MarketSourceIssueKind.RATE_LIMITED,
-        MarketSourceIssueKind.INVALID_PAYLOAD,
-    }),
-    MarketSourceHealthState.GAP_DETECTED: frozenset({
-        MarketSourceIssueKind.SEQUENCE_GAP,
-        MarketSourceIssueKind.OUT_OF_ORDER,
-        MarketSourceIssueKind.CLOCK_SKEW,
-        MarketSourceIssueKind.RATE_LIMITED,
-        MarketSourceIssueKind.INVALID_PAYLOAD,
-    }),
-    MarketSourceHealthState.RECONNECTING: frozenset({
-        MarketSourceIssueKind.RECONNECTING,
-        MarketSourceIssueKind.NO_DATA,
-        MarketSourceIssueKind.TRANSPORT_ERROR,
-        MarketSourceIssueKind.RATE_LIMITED,
-    }),
-    MarketSourceHealthState.RECOVERING: frozenset({
-        MarketSourceIssueKind.STALE_DATA,
-        MarketSourceIssueKind.SEQUENCE_GAP,
-        MarketSourceIssueKind.OUT_OF_ORDER,
-        MarketSourceIssueKind.CLOCK_SKEW,
-        MarketSourceIssueKind.RECONNECTING,
-        MarketSourceIssueKind.RATE_LIMITED,
-        MarketSourceIssueKind.TRANSPORT_ERROR,
-        MarketSourceIssueKind.INVALID_PAYLOAD,
-    }),
-    MarketSourceHealthState.DISCONNECTED: frozenset({
-        MarketSourceIssueKind.NO_DATA,
-        MarketSourceIssueKind.TRANSPORT_ERROR,
-    }),
-    MarketSourceHealthState.UNSUPPORTED: frozenset({
-        MarketSourceIssueKind.UNSUPPORTED,
-    }),
+    MarketSourceHealthState.DEGRADED: frozenset(
+        {
+            MarketSourceIssueKind.CLOCK_SKEW,
+            MarketSourceIssueKind.INVALID_PAYLOAD,
+            MarketSourceIssueKind.OUT_OF_ORDER,
+            MarketSourceIssueKind.RATE_LIMITED,
+        }
+    ),
+    MarketSourceHealthState.STALE: frozenset(
+        {
+            MarketSourceIssueKind.CLOCK_SKEW,
+            MarketSourceIssueKind.INVALID_PAYLOAD,
+            MarketSourceIssueKind.RATE_LIMITED,
+            MarketSourceIssueKind.STALE_DATA,
+        }
+    ),
+    MarketSourceHealthState.GAP_DETECTED: frozenset(
+        {
+            MarketSourceIssueKind.CLOCK_SKEW,
+            MarketSourceIssueKind.INVALID_PAYLOAD,
+            MarketSourceIssueKind.OUT_OF_ORDER,
+            MarketSourceIssueKind.RATE_LIMITED,
+            MarketSourceIssueKind.SEQUENCE_GAP,
+        }
+    ),
+    MarketSourceHealthState.RECONNECTING: frozenset(
+        {
+            MarketSourceIssueKind.NO_DATA,
+            MarketSourceIssueKind.RATE_LIMITED,
+            MarketSourceIssueKind.RECONNECTING,
+            MarketSourceIssueKind.TRANSPORT_ERROR,
+        }
+    ),
+    MarketSourceHealthState.RECOVERING: frozenset(
+        {
+            MarketSourceIssueKind.CLOCK_SKEW,
+            MarketSourceIssueKind.INVALID_PAYLOAD,
+            MarketSourceIssueKind.OUT_OF_ORDER,
+            MarketSourceIssueKind.RATE_LIMITED,
+            MarketSourceIssueKind.RECONNECTING,
+            MarketSourceIssueKind.SEQUENCE_GAP,
+            MarketSourceIssueKind.STALE_DATA,
+            MarketSourceIssueKind.TRANSPORT_ERROR,
+        }
+    ),
+    MarketSourceHealthState.DISCONNECTED: frozenset(
+        {
+            MarketSourceIssueKind.NO_DATA,
+            MarketSourceIssueKind.TRANSPORT_ERROR,
+        }
+    ),
+    MarketSourceHealthState.UNSUPPORTED: frozenset(
+        {
+            MarketSourceIssueKind.UNSUPPORTED,
+        }
+    ),
 }
 
 
@@ -1170,10 +1203,9 @@ def _validate_health_state_consistency(  # noqa: PLR0912
     issues: tuple[MarketSourceIssueKind, ...],
 ) -> None:
     issue_set = set(issues)
-    allowed = _HEALTH_ALLOWED_ISSUES[state]
-    forbidden = issue_set - allowed
+    forbidden = issue_set - _HEALTH_ALLOWED_ISSUES[state]
     if forbidden:
-        forbidden_names = ", ".join(sorted(i.value for i in forbidden))
+        forbidden_names = ", ".join(sorted(issue.value for issue in forbidden))
         raise ValueError(
             f"{state.value} market source health does not permit issues: {forbidden_names}"
         )
@@ -1193,26 +1225,29 @@ def _validate_health_state_consistency(  # noqa: PLR0912
         if MarketSourceIssueKind.STALE_DATA not in issue_set:
             raise ValueError("STALE market source health requires STALE_DATA")
     elif state is MarketSourceHealthState.GAP_DETECTED:
+        if last_received_at is None:
+            raise ValueError("GAP_DETECTED market source health requires last_received_at")
+        if last_sequence is None:
+            raise ValueError("GAP_DETECTED market source health requires last_sequence")
         if MarketSourceIssueKind.SEQUENCE_GAP not in issue_set:
             raise ValueError("GAP_DETECTED market source health requires SEQUENCE_GAP")
-        if last_received_at is None or last_sequence is None:
-            raise ValueError(
-                "GAP_DETECTED market source health requires receive and sequence context"
-            )
     elif state is MarketSourceHealthState.RECONNECTING:
         if MarketSourceIssueKind.RECONNECTING not in issue_set:
             raise ValueError("RECONNECTING market source health requires RECONNECTING")
     elif state is MarketSourceHealthState.RECOVERING:
         if not issue_set:
-            raise ValueError("RECOVERING market source health requires a relevant issue")
+            raise ValueError("RECOVERING market source health requires at least one issue")
     elif state is MarketSourceHealthState.DISCONNECTED:
-        if not (
-            issue_set & {MarketSourceIssueKind.NO_DATA, MarketSourceIssueKind.TRANSPORT_ERROR}
-        ):
+        outage_issues = {
+            MarketSourceIssueKind.NO_DATA,
+            MarketSourceIssueKind.TRANSPORT_ERROR,
+        }
+        if not (issue_set & outage_issues):
             raise ValueError("DISCONNECTED market source health requires outage issue")
-    elif state is MarketSourceHealthState.UNSUPPORTED:
-        if MarketSourceIssueKind.UNSUPPORTED not in issue_set:
-            raise ValueError("UNSUPPORTED market source health requires UNSUPPORTED")
+    elif state is MarketSourceHealthState.UNSUPPORTED and issue_set != {
+        MarketSourceIssueKind.UNSUPPORTED
+    }:
+        raise ValueError("UNSUPPORTED market source health requires only UNSUPPORTED")
 
 
 def _canonical_json(value: object) -> str:
@@ -1225,3 +1260,595 @@ def _sha256_text(value: str) -> str:
 
 def _json_datetime(value: datetime) -> str:
     return ensure_aware_utc(value).isoformat()
+
+
+class MarketDataObservationKind(StrEnum):
+    BEST_BID_ASK = "BEST_BID_ASK"
+    MARK_PRICE = "MARK_PRICE"
+    INDEX_PRICE = "INDEX_PRICE"
+    LAST_TRADE = "LAST_TRADE"
+    ORDER_BOOK_DEPTH = "ORDER_BOOK_DEPTH"
+    FUNDING_REFERENCE = "FUNDING_REFERENCE"
+    AGGREGATED_TICKER = "AGGREGATED_TICKER"
+    TEST_FIXTURE = "TEST_FIXTURE"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataSourceTrust(StrEnum):
+    OFFICIAL = "OFFICIAL"
+    MANUAL_REVIEWED_OFFICIAL = "MANUAL_REVIEWED_OFFICIAL"
+    TEST_ONLY = "TEST_ONLY"
+    UNTRUSTED = "UNTRUSTED"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataSourceHealth(StrEnum):
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    STALE = "STALE"
+    GAPPED = "GAPPED"
+    UNHEALTHY = "UNHEALTHY"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataContinuityStatus(StrEnum):
+    CONTINUOUS = "CONTINUOUS"
+    GAP_DECLARED = "GAP_DECLARED"
+    GAP_SUSPECTED = "GAP_SUSPECTED"
+    SNAPSHOT_ONLY = "SNAPSHOT_ONLY"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataCompatibility(StrEnum):
+    DIRECT_MATCH = "DIRECT_MATCH"
+    KIND_UNSUPPORTED = "KIND_UNSUPPORTED"
+    SOURCE_UNSUPPORTED = "SOURCE_UNSUPPORTED"
+    SCOPE_MISMATCH = "SCOPE_MISMATCH"
+    NOT_COMPATIBLE = "NOT_COMPATIBLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataReadinessReason(StrEnum):
+    READY = "READY"
+    POLICY_DISABLED = "POLICY_DISABLED"
+    SNAPSHOT_MISSING = "SNAPSHOT_MISSING"
+    SNAPSHOT_STALE = "SNAPSHOT_STALE"
+    SNAPSHOT_FUTURE_DATED = "SNAPSHOT_FUTURE_DATED"
+    SOURCE_RECORD_REQUIRED = "SOURCE_RECORD_REQUIRED"
+    SOURCE_KIND_UNKNOWN = "SOURCE_KIND_UNKNOWN"
+    SOURCE_KIND_UNSUPPORTED = "SOURCE_KIND_UNSUPPORTED"
+    SOURCE_UNTRUSTED = "SOURCE_UNTRUSTED"
+    SOURCE_UNHEALTHY = "SOURCE_UNHEALTHY"
+    OBSERVATION_KIND_UNKNOWN = "OBSERVATION_KIND_UNKNOWN"
+    OBSERVATION_KIND_UNSUPPORTED = "OBSERVATION_KIND_UNSUPPORTED"
+    CONTINUITY_UNKNOWN = "CONTINUITY_UNKNOWN"
+    CONTINUITY_GAPPED = "CONTINUITY_GAPPED"
+    VENUE_MISMATCH = "VENUE_MISMATCH"
+    INSTRUMENT_MISMATCH = "INSTRUMENT_MISMATCH"
+    BID_MISSING = "BID_MISSING"
+    ASK_MISSING = "ASK_MISSING"
+    BID_ASK_CROSSED = "BID_ASK_CROSSED"
+    MARK_PRICE_MISSING = "MARK_PRICE_MISSING"
+    INDEX_PRICE_MISSING = "INDEX_PRICE_MISSING"
+    LAST_PRICE_MISSING = "LAST_PRICE_MISSING"
+    DEPTH_NOTIONAL_MISSING = "DEPTH_NOTIONAL_MISSING"
+    DEPTH_REFERENCE_ASSET_MISSING = "DEPTH_REFERENCE_ASSET_MISSING"
+    DEPTH_REFERENCE_ASSET_MISMATCH = "DEPTH_REFERENCE_ASSET_MISMATCH"
+    SPREAD_MISSING = "SPREAD_MISSING"
+    SPREAD_TOO_WIDE = "SPREAD_TOO_WIDE"
+    SEQUENCE_REQUIRED = "SEQUENCE_REQUIRED"
+    SEQUENCE_GAP_DECLARED = "SEQUENCE_GAP_DECLARED"
+    NOT_READY = "NOT_READY"
+    UNKNOWN = "UNKNOWN"
+
+
+class MarketDataObservationSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    snapshot_id: MarketDataObservationSnapshotId | None = None
+    venue_id: str
+    instrument_id: str
+    observation_kind: MarketDataObservationKind
+    best_bid_price: Decimal | None = None
+    best_ask_price: Decimal | None = None
+    mark_price: Decimal | None = None
+    index_price: Decimal | None = None
+    last_trade_price: Decimal | None = None
+    depth_reference_asset: AssetSymbol | None = None
+    depth_notional: Decimal | None = None
+    spread_bps: Decimal | None = None
+    sequence_number: int | None = None
+    previous_sequence_number: int | None = None
+    continuity_status: MarketDataContinuityStatus
+    observed_at: datetime
+    captured_at: datetime
+    source_kind: MarketDataSourceKind
+    source_trust: MarketDataSourceTrust
+    source_health: MarketDataSourceHealth
+    source_record_id: str | None = None
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
+
+    @field_validator("venue_id", "instrument_id", "source_record_id")
+    @classmethod
+    def _validate_text(cls, value: str | None) -> str | None:
+        return None if value is None else _trimmed(value, "market data text")
+
+    @field_validator("depth_reference_asset", mode="before")
+    @classmethod
+    def _coerce_asset(cls, value: object) -> AssetSymbol | None:
+        return None if value is None else _readiness_asset_symbol(value)
+
+    @field_validator(
+        "best_bid_price",
+        "best_ask_price",
+        "mark_price",
+        "index_price",
+        "last_trade_price",
+        "depth_notional",
+        "spread_bps",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_decimal_field(cls, value: object) -> Decimal | None:
+        return None if value is None else _readiness_decimal(value)
+
+    @field_validator(
+        "best_bid_price",
+        "best_ask_price",
+        "mark_price",
+        "index_price",
+        "last_trade_price",
+    )
+    @classmethod
+    def _validate_positive_price(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value <= 0):
+            raise ValueError("market data price values must be positive")
+        return value
+
+    @field_validator("depth_notional")
+    @classmethod
+    def _validate_positive_depth(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value <= 0):
+            raise ValueError("depth_notional must be positive")
+        return value
+
+    @field_validator("spread_bps")
+    @classmethod
+    def _validate_non_negative_spread(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value < 0):
+            raise ValueError("spread_bps must be >= 0")
+        return value
+
+    @field_validator("sequence_number", "previous_sequence_number")
+    @classmethod
+    def _validate_sequence(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("sequence values must be >= 0")
+        return value
+
+    @field_validator("observed_at", "captured_at")
+    @classmethod
+    def _validate_timestamp(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _readiness_freeze_json_mapping(value, path="metadata")
+
+    @field_serializer("metadata")
+    def _serialize_metadata(self, value: Mapping[str, Any]) -> Any:
+        return _readiness_thaw_json_value(value)
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if self.captured_at < self.observed_at:
+            raise ValueError("captured_at must be >= observed_at")
+        if (
+            self.sequence_number is not None
+            and self.previous_sequence_number is not None
+            and self.sequence_number < self.previous_sequence_number
+        ):
+            raise ValueError("sequence_number must be >= previous_sequence_number")
+        expected = deterministic_market_data_observation_snapshot_id(self)
+        if self.snapshot_id is not None and self.snapshot_id != expected:
+            raise ValueError("snapshot_id is not deterministic")
+        object.__setattr__(self, "snapshot_id", expected)
+        return self
+
+
+class MarketDataReadinessPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    policy_id: MarketDataReadinessPolicyId | None = None
+    max_observation_age: int
+    require_source_record: bool
+    allowed_source_kinds: tuple[MarketDataSourceKind, ...]
+    allowed_source_trust: tuple[MarketDataSourceTrust, ...]
+    allowed_source_health: tuple[MarketDataSourceHealth, ...]
+    allowed_observation_kinds: tuple[MarketDataObservationKind, ...]
+    allowed_continuity_statuses: tuple[MarketDataContinuityStatus, ...]
+    require_sequence: bool
+    require_continuous_sequence: bool
+    require_best_bid: bool
+    require_best_ask: bool
+    require_bid_ask_not_crossed: bool
+    require_mark_price: bool
+    require_index_price: bool
+    require_last_trade_price: bool
+    require_depth_notional: bool
+    require_depth_reference_asset_match: bool
+    require_spread_bps: bool
+    max_spread_bps: Decimal | None = None
+    metadata: Mapping[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def strict_official(cls, *, metadata: Mapping[str, Any] | None = None) -> Self:
+        return cls(
+            max_observation_age=5_000,
+            require_source_record=True,
+            allowed_source_kinds=(
+                MarketDataSourceKind.VENUE_PUBLIC_MARKET_DATA,
+                MarketDataSourceKind.VENUE_PRIVATE_ACCOUNT_MARKET_DATA,
+                MarketDataSourceKind.VENUE_MARK_PRICE_FEED,
+                MarketDataSourceKind.VENUE_INDEX_PRICE_FEED,
+                MarketDataSourceKind.VENUE_ORDER_BOOK_FEED,
+                MarketDataSourceKind.MANUAL_REVIEWED_OBSERVATION,
+            ),
+            allowed_source_trust=(MarketDataSourceTrust.OFFICIAL,),
+            allowed_source_health=(MarketDataSourceHealth.HEALTHY,),
+            allowed_observation_kinds=(
+                MarketDataObservationKind.BEST_BID_ASK,
+                MarketDataObservationKind.ORDER_BOOK_DEPTH,
+                MarketDataObservationKind.MARK_PRICE,
+                MarketDataObservationKind.INDEX_PRICE,
+                MarketDataObservationKind.LAST_TRADE,
+                MarketDataObservationKind.FUNDING_REFERENCE,
+            ),
+            allowed_continuity_statuses=(MarketDataContinuityStatus.CONTINUOUS,),
+            require_sequence=True,
+            require_continuous_sequence=True,
+            require_best_bid=True,
+            require_best_ask=True,
+            require_bid_ask_not_crossed=True,
+            require_mark_price=False,
+            require_index_price=False,
+            require_last_trade_price=False,
+            require_depth_notional=False,
+            require_depth_reference_asset_match=False,
+            require_spread_bps=True,
+            max_spread_bps=None,
+            metadata={"factory": "strict_official"} if metadata is None else metadata,
+        )
+
+    @classmethod
+    def research_fixture(cls, *, metadata: Mapping[str, Any] | None = None) -> Self:
+        return cls(
+            max_observation_age=60_000,
+            require_source_record=True,
+            allowed_source_kinds=(MarketDataSourceKind.TEST_FIXTURE,),
+            allowed_source_trust=(MarketDataSourceTrust.TEST_ONLY,),
+            allowed_source_health=(MarketDataSourceHealth.HEALTHY,),
+            allowed_observation_kinds=(MarketDataObservationKind.TEST_FIXTURE,),
+            allowed_continuity_statuses=(MarketDataContinuityStatus.SNAPSHOT_ONLY,),
+            require_sequence=False,
+            require_continuous_sequence=False,
+            require_best_bid=False,
+            require_best_ask=False,
+            require_bid_ask_not_crossed=False,
+            require_mark_price=False,
+            require_index_price=False,
+            require_last_trade_price=False,
+            require_depth_notional=False,
+            require_depth_reference_asset_match=False,
+            require_spread_bps=False,
+            metadata={"factory": "research_fixture"} if metadata is None else metadata,
+        )
+
+    @field_validator("max_observation_age")
+    @classmethod
+    def _validate_max_observation_age(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("max_observation_age must be positive")
+        return value
+
+    @field_validator("max_spread_bps", mode="before")
+    @classmethod
+    def _coerce_max_spread(cls, value: object) -> Decimal | None:
+        return None if value is None else _readiness_decimal(value)
+
+    @field_validator("max_spread_bps")
+    @classmethod
+    def _validate_max_spread(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and (not value.is_finite() or value < 0):
+            raise ValueError("max_spread_bps must be >= 0")
+        return value
+
+    @field_validator("allowed_source_kinds")
+    @classmethod
+    def _validate_allowed_source_kinds(
+        cls,
+        value: tuple[MarketDataSourceKind, ...],
+    ) -> tuple[MarketDataSourceKind, ...]:
+        if not value:
+            raise ValueError("allowed_source_kinds must be non-empty")
+        kinds = tuple(sorted(set(value), key=lambda item: item.value))
+        if MarketDataSourceKind.UNKNOWN in kinds:
+            raise ValueError("UNKNOWN source kind is not allowed")
+        return kinds
+
+    @field_validator("allowed_source_trust")
+    @classmethod
+    def _validate_allowed_source_trust(
+        cls,
+        value: tuple[MarketDataSourceTrust, ...],
+    ) -> tuple[MarketDataSourceTrust, ...]:
+        if not value:
+            raise ValueError("allowed_source_trust must be non-empty")
+        return tuple(sorted(set(value), key=lambda item: item.value))
+
+    @field_validator("allowed_source_health")
+    @classmethod
+    def _validate_allowed_source_health(
+        cls,
+        value: tuple[MarketDataSourceHealth, ...],
+    ) -> tuple[MarketDataSourceHealth, ...]:
+        if not value:
+            raise ValueError("allowed_source_health must be non-empty")
+        return tuple(sorted(set(value), key=lambda item: item.value))
+
+    @field_validator("allowed_observation_kinds")
+    @classmethod
+    def _validate_allowed_observation_kinds(
+        cls,
+        value: tuple[MarketDataObservationKind, ...],
+    ) -> tuple[MarketDataObservationKind, ...]:
+        if not value:
+            raise ValueError("allowed_observation_kinds must be non-empty")
+        kinds = tuple(sorted(set(value), key=lambda item: item.value))
+        if MarketDataObservationKind.UNKNOWN in kinds:
+            raise ValueError("UNKNOWN observation kind is not allowed")
+        return kinds
+
+    @field_validator("allowed_continuity_statuses")
+    @classmethod
+    def _validate_allowed_continuity_statuses(
+        cls,
+        value: tuple[MarketDataContinuityStatus, ...],
+    ) -> tuple[MarketDataContinuityStatus, ...]:
+        if not value:
+            raise ValueError("allowed_continuity_statuses must be non-empty")
+        return tuple(sorted(set(value), key=lambda item: item.value))
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        return _readiness_freeze_json_mapping(value, path="metadata")
+
+    @field_serializer("metadata")
+    def _serialize_metadata(self, value: Mapping[str, Any]) -> Any:
+        return _readiness_thaw_json_value(value)
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if (
+            self.require_continuous_sequence
+            and MarketDataContinuityStatus.UNKNOWN in self.allowed_continuity_statuses
+        ):
+            raise ValueError("UNKNOWN continuity is not allowed for continuous policy")
+        expected = deterministic_market_data_readiness_policy_id(self)
+        if self.policy_id is not None and self.policy_id != expected:
+            raise ValueError("policy_id is not deterministic")
+        object.__setattr__(self, "policy_id", expected)
+        return self
+
+
+class MarketDataReadinessDecision(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    decision_id: MarketDataReadinessDecisionId | None = None
+    policy_id: MarketDataReadinessPolicyId
+    venue_id: str | None = None
+    instrument_id: str | None = None
+    observation_kind: MarketDataObservationKind | None = None
+    depth_reference_asset: AssetSymbol | None = None
+    ready: bool
+    reason: MarketDataReadinessReason
+    compatibility: MarketDataCompatibility
+    snapshot_id: MarketDataObservationSnapshotId | None = None
+    checked_at: datetime
+    details: Any = Field(default_factory=dict)
+
+    @field_validator("venue_id", "instrument_id")
+    @classmethod
+    def _validate_text(cls, value: str | None) -> str | None:
+        return None if value is None else _trimmed(value, "market data text")
+
+    @field_validator("depth_reference_asset", mode="before")
+    @classmethod
+    def _coerce_asset(cls, value: object) -> AssetSymbol | None:
+        return None if value is None else _readiness_asset_symbol(value)
+
+    @field_validator("checked_at")
+    @classmethod
+    def _validate_checked_at(cls, value: datetime) -> datetime:
+        return ensure_aware_utc(value)
+
+    @field_validator("details")
+    @classmethod
+    def _validate_details(cls, value: Any) -> Any:
+        return _readiness_freeze_json_value(value, path="details")
+
+    @field_serializer("details")
+    def _serialize_details(self, value: Any) -> Any:
+        return _readiness_thaw_json_value(value)
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        if self.ready and self.reason is not MarketDataReadinessReason.READY:
+            raise ValueError("ready market data decision requires READY reason")
+        if not self.ready and self.reason is MarketDataReadinessReason.READY:
+            raise ValueError("not-ready market data decision requires non-READY reason")
+        if self.ready and self.compatibility in {
+            MarketDataCompatibility.UNKNOWN,
+            MarketDataCompatibility.NOT_COMPATIBLE,
+        }:
+            raise ValueError("ready market data decision requires compatibility")
+        expected = deterministic_market_data_readiness_decision_id(self)
+        if self.decision_id is not None and self.decision_id != expected:
+            raise ValueError("decision_id is not deterministic")
+        object.__setattr__(self, "decision_id", expected)
+        return self
+
+
+def deterministic_market_data_observation_snapshot_id(
+    snapshot: MarketDataObservationSnapshot,
+) -> MarketDataObservationSnapshotId:
+    digest = _readiness_digest(_readiness_model_identity(snapshot, exclude={"snapshot_id"}))
+    return MarketDataObservationSnapshotId(value=f"market-data-observation:{digest}")
+
+
+def deterministic_market_data_readiness_policy_id(
+    policy: MarketDataReadinessPolicy,
+) -> MarketDataReadinessPolicyId:
+    digest = _readiness_digest(_readiness_model_identity(policy, exclude={"policy_id"}))
+    return MarketDataReadinessPolicyId(value=f"market-data-policy:{digest}")
+
+
+def deterministic_market_data_readiness_decision_id(
+    decision: MarketDataReadinessDecision,
+) -> MarketDataReadinessDecisionId:
+    digest = _readiness_digest(_readiness_model_identity(decision, exclude={"decision_id"}))
+    return MarketDataReadinessDecisionId(value=f"market-data-readiness:{digest}")
+
+
+def _readiness_asset_symbol(value: object) -> AssetSymbol:
+    if isinstance(value, AssetSymbol):
+        return AssetSymbol.model_validate(value.model_dump())
+    if isinstance(value, str):
+        return AssetSymbol(value)
+    if isinstance(value, Mapping):
+        if set(value) != {"value"}:
+            raise ValueError("serialized asset symbol must contain only value")
+        return AssetSymbol.model_validate(dict(value))
+    raise ValueError("asset symbol input must be an AssetSymbol, string, or mapping")
+
+
+def _readiness_decimal(value: object) -> Decimal:
+    if isinstance(value, bool | float):
+        raise ValueError("decimal value must be Decimal, int, or string")
+    if isinstance(value, Decimal):
+        result = value
+    elif isinstance(value, int | str):
+        try:
+            result = Decimal(str(value))
+        except InvalidOperation as exc:
+            raise ValueError("decimal value is invalid") from exc
+    else:
+        raise ValueError("decimal value must be Decimal, int, or string")
+    if not result.is_finite():
+        raise ValueError("decimal value must be finite")
+    return result
+
+
+def _readiness_model_identity(model: BaseModel, *, exclude: set[str]) -> dict[str, Any]:
+    dumped = model.model_dump()
+    for key in exclude:
+        dumped.pop(key, None)
+    return _readiness_canonical_value(dumped)
+
+
+def _readiness_digest(payload: Any) -> str:
+    return hashlib.sha256(_readiness_canonical_json_bytes(payload)).hexdigest()
+
+
+def _readiness_canonical_value(value: Any) -> Any:
+    result: Any
+    if isinstance(value, Decimal):
+        result = format(value, "f")
+    elif isinstance(value, datetime):
+        result = ensure_aware_utc(value).isoformat()
+    elif isinstance(value, StrEnum):
+        result = value.value
+    elif isinstance(value, BaseModel):
+        result = _readiness_canonical_value(value.model_dump())
+    elif isinstance(value, Mapping):
+        result = {str(key): _readiness_canonical_value(item) for key, item in value.items()}
+    elif isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        result = [_readiness_canonical_value(item) for item in value]
+    else:
+        result = value
+    return result
+
+
+def _readiness_canonical_json_bytes(payload: Any) -> bytes:
+    payload = _readiness_canonical_value(payload)
+    _readiness_validate_json_compatible(payload, path="payload")
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _readiness_validate_json_compatible(value: Any, *, path: str) -> None:
+    if value is None or isinstance(value, str | bool | int):
+        return
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{path} float must be finite")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} object keys must be strings")
+            _readiness_validate_json_compatible(item, path=f"{path}.{key}")
+        return
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        for index, item in enumerate(value):
+            _readiness_validate_json_compatible(item, path=f"{path}[{index}]")
+        return
+    raise ValueError(f"{path} must be JSON-compatible")
+
+
+def _readiness_freeze_json_mapping(
+    value: Mapping[str, Any],
+    *,
+    path: str,
+) -> Mapping[str, Any]:
+    frozen = _readiness_freeze_json_value(value, path=path)
+    if not isinstance(frozen, Mapping):
+        raise ValueError(f"{path} must be a JSON-compatible object")
+    return frozen
+
+
+def _readiness_freeze_json_value(value: Any, *, path: str) -> Any:
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError(f"{path} float must be finite")
+        return value
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{path} object keys must be strings")
+            frozen[key] = _readiness_freeze_json_value(item, path=f"{path}.{key}")
+        return MappingProxyType(frozen)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return tuple(
+            _readiness_freeze_json_value(item, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise ValueError(f"{path} must be JSON-compatible")
+
+
+def _readiness_thaw_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _readiness_thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_readiness_thaw_json_value(item) for item in value]
+    return value

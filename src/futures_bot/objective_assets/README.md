@@ -28,6 +28,8 @@ Objective readiness does not prove margin mode, leverage, risk bracket, or
 liquidation model semantics. Those are handled by margin/liquidation readiness.
 It also does not prove maker/taker fees, funding rules, spread limits, or
 executable depth. Those are handled by execution cost readiness.
+It does not prove fresh bid/ask, mark, index, last-trade, spread, or depth
+observations. Those are handled by market-data readiness.
 
 ## Cross-Venue Comparability
 

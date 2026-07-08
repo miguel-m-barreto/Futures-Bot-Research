@@ -1,1 +1,1 @@
-"""Future market data module boundary."""
+"""Market-data observation readiness domain services."""
