@@ -321,6 +321,30 @@ class MarketDataStoreId(DomainId):
     pass
 
 
+class EventJournalStreamId(DomainId):
+    pass
+
+
+class EventJournalRecordId(DomainId):
+    pass
+
+
+class EventJournalCheckpointId(DomainId):
+    pass
+
+
+class EventJournalReadinessPolicyId(DomainId):
+    pass
+
+
+class EventJournalReadinessDecisionId(DomainId):
+    pass
+
+
+class EventJournalStoreId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

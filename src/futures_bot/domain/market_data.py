@@ -21,6 +21,16 @@ from pydantic import (
 )
 
 from futures_bot.domain.assets import AssetSymbol
+from futures_bot.domain.event_journal import (
+    EventJournalContinuityStatus,
+    EventJournalRecord,
+    EventJournalRecordKind,
+    EventJournalSourceHealth,
+    EventJournalSourceKind,
+    EventJournalSourceTrust,
+    EventJournalStreamId,
+    deterministic_event_journal_stream_id,
+)
 from futures_bot.domain.ids import (
     DomainId,
     MarketConnectionId,
@@ -1720,6 +1730,58 @@ def deterministic_market_data_readiness_decision_id(
 ) -> MarketDataReadinessDecisionId:
     digest = _readiness_digest(_readiness_model_identity(decision, exclude={"decision_id"}))
     return MarketDataReadinessDecisionId(value=f"market-data-readiness:{digest}")
+
+
+def market_data_snapshot_to_event_journal_record(  # noqa: PLR0913
+    snapshot: MarketDataObservationSnapshot,
+    *,
+    stream_id: EventJournalStreamId | None = None,
+    source_kind: EventJournalSourceKind = EventJournalSourceKind.SYSTEM_GENERATED_RECORD,
+    source_trust: EventJournalSourceTrust = EventJournalSourceTrust.SYSTEM_GENERATED,
+    source_health: EventJournalSourceHealth = EventJournalSourceHealth.HEALTHY,
+    continuity_status: EventJournalContinuityStatus = EventJournalContinuityStatus.CONTINUOUS,
+    metadata: Mapping[str, Any] | None = None,
+) -> EventJournalRecord:
+    snapshot = MarketDataObservationSnapshot.model_validate(snapshot.model_dump())
+    if snapshot.sequence_number is None:
+        raise ValueError("market data journal record requires snapshot sequence_number")
+    resolved_stream_id = (
+        market_data_observation_event_journal_stream_id(snapshot)
+        if stream_id is None
+        else stream_id
+    )
+    payload_hash = "sha256:" + _readiness_digest(snapshot.model_dump(mode="json"))
+    return EventJournalRecord(
+        stream_id=resolved_stream_id,
+        record_kind=EventJournalRecordKind.MARKET_DATA_OBSERVATION,
+        sequence_number=snapshot.sequence_number,
+        previous_sequence_number=snapshot.previous_sequence_number,
+        payload_type="MarketDataObservationSnapshot",
+        payload_hash=payload_hash,
+        occurred_at=snapshot.observed_at,
+        recorded_at=snapshot.captured_at,
+        source_kind=source_kind,
+        source_trust=source_trust,
+        source_health=source_health,
+        continuity_status=continuity_status,
+        source_record_id=snapshot.source_record_id,
+        idempotency_key=None if snapshot.snapshot_id is None else str(snapshot.snapshot_id),
+        metadata={} if metadata is None else metadata,
+    )
+
+
+def market_data_observation_event_journal_stream_id(
+    snapshot: MarketDataObservationSnapshot,
+) -> EventJournalStreamId:
+    snapshot = MarketDataObservationSnapshot.model_validate(snapshot.model_dump())
+    return deterministic_event_journal_stream_id(
+        stream_scope={
+            "record_kind": EventJournalRecordKind.MARKET_DATA_OBSERVATION.value,
+            "venue_id": snapshot.venue_id,
+            "instrument_id": snapshot.instrument_id,
+            "observation_kind": snapshot.observation_kind.value,
+        }
+    )
 
 
 def _readiness_asset_symbol(value: object) -> AssetSymbol:

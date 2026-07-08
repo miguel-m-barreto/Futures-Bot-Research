@@ -16,3 +16,6 @@ Collateral valuation readiness, asset conversion readiness, objective readiness,
 margin/liquidation readiness, market-data readiness, and execution cost
 readiness are separate gates. Execution cost rules do not prove fresh bid/ask,
 mark, index, last-trade, or order-book observations.
+
+Event journal readiness is separate too. Execution cost rules do not prove
+contiguous journal sequence, checkpoint scope, or payload-hash evidence.

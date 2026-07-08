@@ -17,3 +17,7 @@ index, and last-trade observations remain distinct evidence paths.
 Collateral valuation readiness, asset conversion readiness, objective readiness,
 margin/liquidation readiness, execution cost readiness, and market-data
 readiness are separate gates.
+
+Event journal readiness is another separate gate. Market-data readiness does
+not prove deterministic stream continuity, checkpoint scope, or replay-ready
+journal evidence.

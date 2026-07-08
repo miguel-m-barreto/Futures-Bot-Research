@@ -13,3 +13,6 @@ default. Isolated, cross, portfolio, and multi-asset modes are explicit policy
 inputs. Collateral valuation readiness, asset conversion readiness, objective
 readiness, execution cost readiness, market-data readiness, and
 margin/liquidation readiness are separate gates.
+
+Event journal readiness is separate too. Margin/liquidation rules do not prove
+stream continuity, checkpoints, or deterministic payload-hash evidence.

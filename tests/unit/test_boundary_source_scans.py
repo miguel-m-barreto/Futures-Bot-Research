@@ -1576,6 +1576,78 @@ def test_market_data_sprint_sources_do_not_use_forbidden_runtime_dependencies() 
             assert name not in source, f"found {name!r} in {path.name}"
 
 
+def test_event_journal_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/event_journal.py",
+        ROOT / "src/futures_bot/ports/event_journal.py",
+        ROOT / "src/futures_bot/event_journal/in_memory.py",
+        ROOT / "src/futures_bot/event_journal/policies.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "socket",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "DBWriter",
+        "LocalJsonlWal",
+        "pathlib",
+        "Path",
+        "open(",
+        "read_text",
+        "write_text",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "asyncio",
+        "threading",
+        "subprocess",
+        "sleep",
+        "Strategy",
+        "DecisionStack",
+        "ExecutionSimulator",
+        "Ledger",
+        "OrderIntent",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_event_journal_has_no_hardcoded_gap_or_stale_acceptance() -> None:
+    source = "\n".join(
+        (
+            (ROOT / "src/futures_bot/domain/event_journal.py").read_text(encoding="utf-8"),
+            (ROOT / "src/futures_bot/event_journal/policies.py").read_text(
+                encoding="utf-8"
+            ),
+        )
+    )
+    forbidden_phrases = (
+        "accept stale",
+        "allow stale",
+        "accept gapped",
+        "allow gapped",
+        "GAP_DECLARED, EventJournalContinuityStatus.GAP_SUSPECTED",
+        "EventJournalSourceHealth.GAPPED, EventJournalSourceHealth.STALE",
+    )
+    for phrase in forbidden_phrases:
+        assert phrase not in source
+
+
 def test_replay_market_data_sources_do_not_use_forbidden_runtime_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/replay_market_data.py",

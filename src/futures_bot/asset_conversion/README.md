@@ -28,3 +28,6 @@ maker fees, taker fees, funding rules, spread limits, or executable depth.
 
 Market-data readiness is separate as well. Conversion evidence does not prove
 fresh bid/ask, mark, index, last-trade, spread, or depth observations.
+
+Event journal readiness is separate as well. Conversion evidence does not prove
+contiguous stream sequence, checkpoints, or deterministic payload-hash evidence.
