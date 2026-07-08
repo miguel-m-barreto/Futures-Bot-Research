@@ -828,6 +828,64 @@ def test_asset_conversion_has_no_hardcoded_stablecoin_equivalence() -> None:
             assert phrase not in source, f"found {phrase!r} in {path.name}"
 
 
+def test_margin_liquidation_source_files_do_not_import_forbidden_dependencies() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/margin_liquidation.py",
+        ROOT / "src/futures_bot/ports/margin_liquidation.py",
+        ROOT / "src/futures_bot/margin_liquidation/in_memory.py",
+        ROOT / "src/futures_bot/margin_liquidation/policies.py",
+    )
+    forbidden = (
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websockets",
+        "ccxt",
+        "sqlalchemy",
+        "psycopg",
+        "asyncpg",
+        "duckdb",
+        "sqlite",
+        "confluent_kafka",
+        "aiokafka",
+        "Kafka",
+        "Redis",
+        "Postgres",
+        "datetime.now",
+        "time.time",
+        "random",
+        "uuid",
+        "submit_order",
+        "strategy",
+        "simulator",
+        "portfolio margin engine",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for name in forbidden:
+            assert name not in source, f"found {name!r} in {path.name}"
+
+
+def test_margin_liquidation_has_no_hardcoded_stablecoin_or_leverage_defaults() -> None:
+    source_paths = (
+        ROOT / "src/futures_bot/domain/margin_liquidation.py",
+        ROOT / "src/futures_bot/margin_liquidation/policies.py",
+    )
+    forbidden_phrases = (
+        "USDT == USD",
+        "USDC == USDT",
+        "stablecoin parity",
+        "stablecoins are equivalent",
+        "default leverage",
+        "100x",
+        "liquidation price",
+    )
+    for path in source_paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden_phrases:
+            assert phrase not in source, f"found {phrase!r} in {path.name}"
+
+
 def test_venue_registry_source_files_do_not_import_forbidden_dependencies() -> None:
     source_paths = (
         ROOT / "src/futures_bot/domain/venue_registry.py",

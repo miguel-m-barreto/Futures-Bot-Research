@@ -24,6 +24,9 @@ Reference-value measurement still requires explicit evidence when the outcome as
 
 Objective asset mismatches require scoped conversion readiness from the asset being measured into the objective, reference, or settlement asset required by the policy. Unrelated conversion readiness and collateral valuation readiness are not interchangeable evidence.
 
+Objective readiness does not prove margin mode, leverage, risk bracket, or
+liquidation model semantics. Those are handled by margin/liquidation readiness.
+
 ## Cross-Venue Comparability
 
 A cross-venue opportunity is not profit unless the economic objective is defined.

@@ -22,7 +22,12 @@ from futures_bot.domain.ids import (
     CollateralValuationPolicyId,
     ContractAssetSemanticsId,
     EconomicExposureId,
+    MarginLiquidationPolicyId,
     ObjectiveAssetPolicyId,
+)
+from futures_bot.domain.margin_liquidation import (
+    MarginLiquidationReadinessDecision,
+    MarginMode,
 )
 from futures_bot.domain.objective_assets import (
     ObjectiveAssetCompatibility,
@@ -95,6 +100,8 @@ class AssetSemanticsReadinessReason(StrEnum):
     HAIRCUT_RULES_REQUIRED = "HAIRCUT_RULES_REQUIRED"
     CONVERSION_RULES_REQUIRED = "CONVERSION_RULES_REQUIRED"
     OBJECTIVE_ASSET_VALUATION_REQUIRED = "OBJECTIVE_ASSET_VALUATION_REQUIRED"
+    MARGIN_RULES_REQUIRED = "MARGIN_RULES_REQUIRED"
+    LIQUIDATION_RULES_REQUIRED = "LIQUIDATION_RULES_REQUIRED"
     ECONOMIC_EXPOSURE_MISMATCH = "ECONOMIC_EXPOSURE_MISMATCH"
 
 
@@ -191,8 +198,11 @@ class ContractAssetSemantics(BaseModel):
     requires_haircut_rules: bool
     requires_conversion_rules: bool
     requires_objective_valuation: bool
+    requires_margin_rules: bool = False
+    requires_liquidation_rules: bool = False
     collateral_valuation_policy_id: CollateralValuationPolicyId | None = None
     objective_asset_policy_id: ObjectiveAssetPolicyId | None = None
+    margin_liquidation_policy_id: MarginLiquidationPolicyId | None = None
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     @field_validator("venue_id", "instrument_id")
@@ -467,6 +477,50 @@ def validate_contract_asset_semantics_conversion_readiness(
     )
 
 
+def validate_contract_asset_semantics_margin_liquidation_readiness(
+    semantics: ContractAssetSemantics,
+    margin_decision: MarginLiquidationReadinessDecision | None,
+) -> ContractAssetSemanticsReadinessDecision:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        reason = base_reason
+    elif not semantics.requires_margin_rules and not semantics.requires_liquidation_rules:
+        reason = AssetSemanticsReadinessReason.READY
+    elif not _margin_liquidation_decision_matches_semantics(semantics, margin_decision):
+        reason = (
+            AssetSemanticsReadinessReason.MARGIN_RULES_REQUIRED
+            if semantics.requires_margin_rules
+            else AssetSemanticsReadinessReason.LIQUIDATION_RULES_REQUIRED
+        )
+    elif semantics.requires_collateral_valuation:
+        reason = AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    elif semantics.requires_haircut_rules:
+        reason = AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    elif semantics.requires_conversion_rules:
+        reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    elif _objective_valuation_is_missing(semantics):
+        reason = AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    else:
+        reason = AssetSemanticsReadinessReason.READY
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=_valuation_requirements(semantics),
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "margin_decision_id": None
+            if margin_decision is None
+            else str(margin_decision.decision_id),
+        },
+    )
+
+
 def compare_cross_venue_economic_exposures(
     left: EconomicExposureDescriptor,
     right: EconomicExposureDescriptor,
@@ -716,6 +770,41 @@ def _conversion_decision_matches_semantics(
     )
 
 
+def _margin_liquidation_decision_matches_semantics(  # noqa: PLR0911
+    semantics: ContractAssetSemantics,
+    margin_decision: MarginLiquidationReadinessDecision | None,
+) -> bool:
+    if margin_decision is None or not margin_decision.ready:
+        return False
+    if margin_decision.venue_id is None:
+        return False
+    if margin_decision.venue_id != semantics.venue_id:
+        return False
+    if margin_decision.instrument_id is None:
+        return False
+    if margin_decision.instrument_id != semantics.instrument_id:
+        return False
+    if margin_decision.margin_mode in {None, MarginMode.UNKNOWN}:
+        return False
+    if (
+        semantics.margin_liquidation_policy_id is not None
+        and margin_decision.policy_id != semantics.margin_liquidation_policy_id
+    ):
+        return False
+    if margin_decision.margin_asset is None:
+        return False
+    if str(margin_decision.margin_asset) != _asset_key(semantics.margin_asset):
+        return False
+    if margin_decision.settlement_asset is None:
+        return False
+    if str(margin_decision.settlement_asset) != _asset_key(semantics.settlement_asset):
+        return False
+    if margin_decision.collateral_asset is None:
+        return False
+    collateral_assets = {_asset_key(asset) for asset in semantics.collateral_assets}
+    return str(margin_decision.collateral_asset) in collateral_assets
+
+
 def _required_conversion_path(semantics: ContractAssetSemantics) -> tuple[str, str]:
     if semantics.objective_asset is not None:
         return _asset_key(semantics.pnl_asset), _asset_key(semantics.objective_asset)
@@ -752,6 +841,8 @@ def _valuation_requirements(
         requirements.append(ValuationRequirement.REQUIRED_FOR_OBJECTIVE)
     if semantics.requires_conversion_rules:
         requirements.append(ValuationRequirement.REQUIRED_UNKNOWN)
+    if semantics.requires_margin_rules or semantics.requires_liquidation_rules:
+        requirements.append(ValuationRequirement.REQUIRED_FOR_MARGIN)
     if not requirements:
         requirements.append(ValuationRequirement.NOT_REQUIRED)
     return tuple(requirements)

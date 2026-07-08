@@ -273,6 +273,22 @@ class AssetConversionStoreId(DomainId):
     pass
 
 
+class MarginLiquidationRuleSnapshotId(DomainId):
+    pass
+
+
+class MarginLiquidationPolicyId(DomainId):
+    pass
+
+
+class MarginLiquidationReadinessDecisionId(DomainId):
+    pass
+
+
+class MarginLiquidationStoreId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

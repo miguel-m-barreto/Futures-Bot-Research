@@ -18,3 +18,7 @@ settlement, objective, or reference conversion by itself.
 
 Objective asset readiness can consume scoped conversion evidence. It cannot
 invent conversion evidence or treat unrelated READY decisions as interchangeable.
+
+Margin/liquidation readiness is a separate gate. Conversion evidence does not
+prove margin mode, risk tier, leverage, maintenance margin, or liquidation model
+semantics.
