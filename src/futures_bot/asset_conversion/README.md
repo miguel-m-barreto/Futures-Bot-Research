@@ -22,3 +22,6 @@ invent conversion evidence or treat unrelated READY decisions as interchangeable
 Margin/liquidation readiness is a separate gate. Conversion evidence does not
 prove margin mode, risk tier, leverage, maintenance margin, or liquidation model
 semantics.
+
+Execution cost readiness is also separate. Conversion evidence does not prove
+maker fees, taker fees, funding rules, spread limits, or executable depth.

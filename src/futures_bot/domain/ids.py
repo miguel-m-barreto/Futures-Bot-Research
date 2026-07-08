@@ -289,6 +289,22 @@ class MarginLiquidationStoreId(DomainId):
     pass
 
 
+class ExecutionCostRuleSnapshotId(DomainId):
+    pass
+
+
+class ExecutionCostPolicyId(DomainId):
+    pass
+
+
+class ExecutionCostReadinessDecisionId(DomainId):
+    pass
+
+
+class ExecutionCostStoreId(DomainId):
+    pass
+
+
 class CollateralValuationPolicyId(DomainId):
     pass
 

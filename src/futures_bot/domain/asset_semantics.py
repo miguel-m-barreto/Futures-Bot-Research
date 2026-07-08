@@ -16,12 +16,14 @@ from futures_bot.domain.collateral_valuation import (
     CollateralValuationDecisionReason,
     CollateralValuationReadinessDecision,
 )
+from futures_bot.domain.execution_costs import ExecutionCostReadinessDecision
 from futures_bot.domain.ids import (
     AssetSemanticsId,
     AssetSymbolId,
     CollateralValuationPolicyId,
     ContractAssetSemanticsId,
     EconomicExposureId,
+    ExecutionCostPolicyId,
     MarginLiquidationPolicyId,
     ObjectiveAssetPolicyId,
 )
@@ -102,6 +104,7 @@ class AssetSemanticsReadinessReason(StrEnum):
     OBJECTIVE_ASSET_VALUATION_REQUIRED = "OBJECTIVE_ASSET_VALUATION_REQUIRED"
     MARGIN_RULES_REQUIRED = "MARGIN_RULES_REQUIRED"
     LIQUIDATION_RULES_REQUIRED = "LIQUIDATION_RULES_REQUIRED"
+    EXECUTION_COST_RULES_REQUIRED = "EXECUTION_COST_RULES_REQUIRED"
     ECONOMIC_EXPOSURE_MISMATCH = "ECONOMIC_EXPOSURE_MISMATCH"
 
 
@@ -186,6 +189,8 @@ class ContractAssetSemantics(BaseModel):
     settlement_asset: AssetDescriptor
     pnl_asset: AssetDescriptor
     fee_asset: AssetDescriptor | None = None
+    funding_asset: AssetDescriptor | None = None
+    depth_reference_asset: AssetDescriptor | None = None
     collateral_assets: tuple[AssetDescriptor, ...]
     valuation_reference_asset: AssetDescriptor
     objective_asset: AssetDescriptor | None = None
@@ -200,9 +205,13 @@ class ContractAssetSemantics(BaseModel):
     requires_objective_valuation: bool
     requires_margin_rules: bool = False
     requires_liquidation_rules: bool = False
+    requires_fee_rules: bool = False
+    requires_funding_rules: bool = False
+    requires_depth_rules: bool = False
     collateral_valuation_policy_id: CollateralValuationPolicyId | None = None
     objective_asset_policy_id: ObjectiveAssetPolicyId | None = None
     margin_liquidation_policy_id: MarginLiquidationPolicyId | None = None
+    execution_cost_policy_id: ExecutionCostPolicyId | None = None
     metadata: Mapping[str, Any] = Field(default_factory=dict)
 
     @field_validator("venue_id", "instrument_id")
@@ -521,6 +530,50 @@ def validate_contract_asset_semantics_margin_liquidation_readiness(
     )
 
 
+def validate_contract_asset_semantics_execution_cost_readiness(
+    semantics: ContractAssetSemantics,
+    cost_decision: ExecutionCostReadinessDecision | None,
+) -> ContractAssetSemanticsReadinessDecision:
+    base_reason = _readiness_reason_for_semantic_shape(semantics)
+    if base_reason is not AssetSemanticsReadinessReason.READY:
+        reason = base_reason
+    elif not _execution_cost_rules_required(semantics):
+        reason = AssetSemanticsReadinessReason.READY
+    elif not _execution_cost_decision_matches_semantics(semantics, cost_decision):
+        reason = AssetSemanticsReadinessReason.EXECUTION_COST_RULES_REQUIRED
+    elif semantics.requires_collateral_valuation:
+        reason = AssetSemanticsReadinessReason.VALUATION_REQUIRED
+    elif semantics.requires_haircut_rules:
+        reason = AssetSemanticsReadinessReason.HAIRCUT_RULES_REQUIRED
+    elif semantics.requires_conversion_rules:
+        reason = AssetSemanticsReadinessReason.CONVERSION_RULES_REQUIRED
+    elif _objective_valuation_is_missing(semantics):
+        reason = AssetSemanticsReadinessReason.OBJECTIVE_ASSET_VALUATION_REQUIRED
+    elif semantics.requires_margin_rules:
+        reason = AssetSemanticsReadinessReason.MARGIN_RULES_REQUIRED
+    elif semantics.requires_liquidation_rules:
+        reason = AssetSemanticsReadinessReason.LIQUIDATION_RULES_REQUIRED
+    else:
+        reason = AssetSemanticsReadinessReason.READY
+    ready = reason is AssetSemanticsReadinessReason.READY
+    return ContractAssetSemanticsReadinessDecision(
+        semantics_id=_required_contract_asset_semantics_id(semantics),
+        ready=ready,
+        reason=reason,
+        valuation_requirements=_valuation_requirements(semantics),
+        details={
+            "venue_id": semantics.venue_id,
+            "instrument_id": semantics.instrument_id,
+            "payoff_kind": semantics.payoff_kind.value,
+            "collateral_mode": semantics.collateral_mode.value,
+            "settlement_mode": semantics.settlement_mode.value,
+            "cost_decision_id": None
+            if cost_decision is None
+            else str(cost_decision.decision_id),
+        },
+    )
+
+
 def compare_cross_venue_economic_exposures(
     left: EconomicExposureDescriptor,
     right: EconomicExposureDescriptor,
@@ -805,6 +858,57 @@ def _margin_liquidation_decision_matches_semantics(  # noqa: PLR0911
     return str(margin_decision.collateral_asset) in collateral_assets
 
 
+def _execution_cost_decision_matches_semantics(  # noqa: PLR0911, PLR0912
+    semantics: ContractAssetSemantics,
+    cost_decision: ExecutionCostReadinessDecision | None,
+) -> bool:
+    if not isinstance(cost_decision, ExecutionCostReadinessDecision):
+        return False
+    if not cost_decision.ready:
+        return False
+    if cost_decision.venue_id is None or cost_decision.venue_id != semantics.venue_id:
+        return False
+    if (
+        cost_decision.instrument_id is None
+        or cost_decision.instrument_id != semantics.instrument_id
+    ):
+        return False
+    if (
+        semantics.execution_cost_policy_id is not None
+        and cost_decision.policy_id != semantics.execution_cost_policy_id
+    ):
+        return False
+    if semantics.requires_fee_rules:
+        if semantics.fee_asset is None or cost_decision.fee_asset is None:
+            return False
+        if str(cost_decision.fee_asset) != _asset_key(semantics.fee_asset):
+            return False
+    if semantics.requires_funding_rules:
+        if semantics.funding_asset is None or cost_decision.funding_asset is None:
+            return False
+        if str(cost_decision.funding_asset) != _asset_key(semantics.funding_asset):
+            return False
+    if semantics.requires_depth_rules:
+        if (
+            semantics.depth_reference_asset is None
+            or cost_decision.depth_reference_asset is None
+        ):
+            return False
+        if str(cost_decision.depth_reference_asset) != _asset_key(
+            semantics.depth_reference_asset,
+        ):
+            return False
+    return True
+
+
+def _execution_cost_rules_required(semantics: ContractAssetSemantics) -> bool:
+    return (
+        semantics.requires_fee_rules
+        or semantics.requires_funding_rules
+        or semantics.requires_depth_rules
+    )
+
+
 def _required_conversion_path(semantics: ContractAssetSemantics) -> tuple[str, str]:
     if semantics.objective_asset is not None:
         return _asset_key(semantics.pnl_asset), _asset_key(semantics.objective_asset)
@@ -862,6 +966,8 @@ def _all_semantic_assets(
     ]
     for optional_asset in (
         semantics.fee_asset,
+        semantics.funding_asset,
+        semantics.depth_reference_asset,
         semantics.objective_asset,
         semantics.contract_value_asset,
     ):

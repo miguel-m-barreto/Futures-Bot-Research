@@ -51,3 +51,7 @@ A ready collateral valuation can be evidence for objective readiness, but it doe
 Collateral valuation also does not prove margin mode, risk tier, leverage,
 maintenance margin, or liquidation model semantics. Margin/liquidation readiness
 is a separate source-backed gate.
+
+Collateral valuation also does not prove maker fees, taker fees, funding rules,
+spread limits, or executable depth. Execution cost readiness is a separate
+source-backed gate.
